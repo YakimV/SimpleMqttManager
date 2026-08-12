@@ -17,6 +17,7 @@ except ImportError as exc:
 APP_TITLE = "Simple MQTT Manager"
 APP_VERSION = "1.0"
 
+
 CONFIG_DIR = Path(__file__).parent / "config"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
