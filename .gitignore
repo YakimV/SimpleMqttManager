@@ -1,0 +1,11 @@
+
+.venv/
+__pycache__/
+*.pyc
+
+
+config/settings.json
+config/*copy*
+
+v*.py
+!SimpleMqttManager.py
