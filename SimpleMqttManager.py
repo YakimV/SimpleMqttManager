@@ -17,14 +17,13 @@ except ImportError as exc:
 APP_TITLE = "Simple MQTT Manager"
 APP_VERSION = "1.0"
 
-
 CONFIG_DIR = Path(__file__).parent / "config"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 
 
-# --- Клас для спливаючих підказок (Tooltip) ---
+# --- Tooltip Class ---
 class Tooltip:
     def __init__(self, widget, text):
         self.widget = widget
@@ -54,7 +53,7 @@ class Tooltip:
             self.tooltip_window = None
 
 
-# --- Клас окремого робочого простору ---
+# --- MQTT Workspace Class ---
 class MQTTWorkspace(ctk.CTkFrame):
     RECONNECT_DELAY_MS = 5000
 
@@ -63,7 +62,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.app = app_instance
         self.workspace_id = workspace_id
 
-        # MQTT & Стан
+        # MQTT & State
         self.event_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self.client: Optional[mqtt.Client] = None
         self.connected = False
@@ -75,7 +74,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.quick_buttons: list[dict] = []
         self.all_log_lines: list[str] = []
 
-        # Локальні змінні
+        # Local variables
         self.host_var = tk.StringVar(value="")
         self.port_var = tk.StringVar(value="1883")
         self.username_var = tk.StringVar(value="")
@@ -96,7 +95,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.auto_scroll_var = tk.BooleanVar(value=True)
         self.log_filter_var = tk.StringVar(value="")
 
-        # Єдині палітри для всієї програми
+        # Unified color palettes for the application
         self.CARD_BG = ("#ffffff", "#1e293b")
         self.CARD_BORDER = ("#cbd5e1", "#334155")
         self.TEXT_BG = ("#ffffff", "#0f172a")
@@ -121,7 +120,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # Верхній статус-бар
+        # Top status bar
         self.top_bar = ctk.CTkFrame(self, height=36, corner_radius=0, fg_color=("#e2e8f0", "#1e293b"))
         self.top_bar.grid(row=0, column=0, sticky="ew")
 
@@ -350,10 +349,10 @@ class MQTTWorkspace(ctk.CTkFrame):
 
         tab.grid_rowconfigure(2, weight=1)
 
-        # Стандартизована картка для активних підписок (замість синього виділення)
+        # Standardized card for active subscriptions
         active_block = ctk.CTkFrame(tab, fg_color=self.CARD_BG, border_width=1, border_color=self.CARD_BORDER, corner_radius=6)
         active_block.grid(row=2, column=0, padx=10, pady=5, sticky="nsew")
-        
+
         header_row = ctk.CTkFrame(active_block, fg_color="transparent")
         header_row.pack(fill="x", padx=10, pady=(5, 0))
         ctk.CTkLabel(header_row, text="Active Subscriptions", font=self.app.font_bold, text_color=self.TITLE_COLOR).pack(side="left")
@@ -538,7 +537,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.log_text.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         self.log_text.configure(state="disabled")
 
-    # --- Клієнтська логіка MQTT ---
+    # --- MQTT Client Logic ---
     def load_workspace_data(self, data: dict):
         self.host_var.set(data.get("host", ""))
         self.port_var.set(str(data.get("port", "1883")))
@@ -795,7 +794,7 @@ class MQTTWorkspace(ctk.CTkFrame):
             self.indicator_lamp.configure(fg_color="#ef4444")
 
 
-# --- ГОЛОВНЕ ВІКНО ПРОГРАМИ ---
+# --- Main Application Window ---
 class MQTTControlCenter(ctk.CTk):
     def __init__(self):
         super().__init__()
