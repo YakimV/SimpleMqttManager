@@ -3,3 +3,8 @@
 A simple GUI tool for configuring and debugging MQTT devices during development.
 
 Created for personal use to conveniently check topics, view telemetry, and send test commands.
+
+
+<img width="1583" height="816" alt="screen_dark" src="https://github.com/user-attachments/assets/eee5b024-dbee-4389-9565-b5bd75943f94" />
+
+<img width="1583" height="816" alt="screen_white" src="https://github.com/user-attachments/assets/21e20e16-81ec-4a49-8e12-c1a583809f90" />
