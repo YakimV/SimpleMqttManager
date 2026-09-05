@@ -15,7 +15,8 @@ except ImportError as exc:
     raise SystemExit("Missing dependency: paho-mqtt. Install it with: pip install paho-mqtt") from exc
 
 APP_TITLE = "Simple MQTT Manager"
-APP_VERSION = "1.0"
+APP_VERSION = "1.3"
+DEFAULT_WORKSPACES = 8
 
 CONFIG_DIR = Path(__file__).parent / "config"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -42,9 +43,18 @@ class Tooltip:
         tw.wm_overrideredirect(True)
         tw.wm_geometry(f"+{x}+{y}")
 
-        label = tk.Label(tw, text=self.text, justify='left',
-                         background="#1e293b", foreground="white", relief='solid', borderwidth=1,
-                         font=("Arial", 11, "normal"), padx=8, pady=4)
+        label = tk.Label(
+            tw,
+            text=self.text,
+            justify="left",
+            background="#1e293b",
+            foreground="white",
+            relief="solid",
+            borderwidth=1,
+            font=("Arial", 11, "normal"),
+            padx=8,
+            pady=4,
+        )
         label.pack()
 
     def hide_tooltip(self, event=None):
@@ -74,7 +84,13 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.quick_buttons: list[dict] = []
         self.all_log_lines: list[str] = []
 
+        # Tracks which inner tabs have had their widgets built (lazy build)
+        self._built_tabs: set[str] = set()
+        # Pending saved data, applied to a tab's widgets once that tab is built
+        self._pending_data: Optional[dict] = None
+
         # Local variables
+        self.name_var = tk.StringVar(value=f"Workspace {workspace_id}")
         self.host_var = tk.StringVar(value="")
         self.port_var = tk.StringVar(value="1883")
         self.username_var = tk.StringVar(value="")
@@ -95,7 +111,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.auto_scroll_var = tk.BooleanVar(value=True)
         self.log_filter_var = tk.StringVar(value="")
 
-        # Unified color palettes for the application
+        # Color palettes
         self.CARD_BG = ("#ffffff", "#1e293b")
         self.CARD_BORDER = ("#cbd5e1", "#334155")
         self.TEXT_BG = ("#ffffff", "#0f172a")
@@ -105,14 +121,19 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.sb_color = ("#cbd5e1", "#475569")
         self.sb_hover = ("#94a3b8", "#64748b")
 
+        self.name_var.trace_add("write", lambda *a: self._on_name_change())
         self.log_filter_var.trace_add("write", lambda *a: self._render_log())
 
         self._build_ui()
-        self.after(100, self._process_event_queue)
+        self.after(200, self._process_event_queue)
+
+    def _on_name_change(self):
+        name = self.name_var.get().strip() or f"Workspace {self.workspace_id}"
+        self.app.update_workspace_title(self.workspace_id, name)
 
     def _truncate(self, text: str, max_len: int = 32) -> str:
         if len(text) > max_len:
-            return text[:max_len-3] + "..."
+            return text[: max_len - 3] + "..."
         return text
 
     def _build_ui(self):
@@ -143,7 +164,7 @@ class MQTTWorkspace(ctk.CTkFrame):
             fg_color=("#cbd5e1", "#334155"),
             hover_color=("#94a3b8", "#475569"),
             text_color=("black", "white"),
-            command=self.app.toggle_theme
+            command=self.app.toggle_theme,
         )
         self.theme_btn.pack(side="right", padx=8, pady=3)
         Tooltip(self.theme_btn, "Toggle Light/Dark Theme")
@@ -155,7 +176,7 @@ class MQTTWorkspace(ctk.CTkFrame):
             bd=0,
             sashwidth=4,
             bg=paned_bg,
-            sashcursor="sb_h_double_arrow"
+            sashcursor="sb_h_double_arrow",
         )
         self.paned_window.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
 
@@ -166,22 +187,26 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.paned_window.add(self.left_panel, minsize=350, width=420)
         self.paned_window.add(self.right_panel, minsize=300, width=680)
 
-        self.tabs = ctk.CTkTabview(self.left_panel, corner_radius=0, fg_color=("#f8fafc", "#1e293b"))
+        # NOTE: command= fires whenever the visible inner tab changes, so we can
+        # build that tab's widgets lazily instead of building all four up front.
+        self.tabs = ctk.CTkTabview(
+            self.left_panel,
+            corner_radius=0,
+            fg_color=("#f8fafc", "#1e293b"),
+            command=self._on_inner_tab_changed,
+        )
         self.tabs.pack(fill="both", expand=True, padx=2, pady=2)
 
         try:
             self.tabs._segmented_button.configure(font=self.app.font_normal)
-        except AttributeError: pass
+        except AttributeError:
+            pass
 
+        # Only create the empty tab containers here - contents are built lazily.
         self.tabs.add("Connection")
         self.tabs.add("Publish")
         self.tabs.add("Subscribe")
         self.tabs.add("Buttons")
-
-        self._build_connection_tab()
-        self._build_publish_tab()
-        self._build_subscribe_tab()
-        self._build_buttons_tab()
 
         self.logs_container = ctk.CTkFrame(self.right_panel, corner_radius=0, fg_color=panel_fg)
         self.logs_container.pack(fill="both", expand=True, padx=2, pady=2)
@@ -189,10 +214,34 @@ class MQTTWorkspace(ctk.CTkFrame):
 
         self._set_connected_ui(False)
 
+        # Build only the tab that's visible right now (Connection, by default).
+        self._ensure_tab_built(self.tabs.get())
+
+    def _on_inner_tab_changed(self):
+        self._ensure_tab_built(self.tabs.get())
+
+    def _ensure_tab_built(self, tab_name: str):
+        if tab_name in self._built_tabs:
+            return
+        self._built_tabs.add(tab_name)
+
+        if tab_name == "Connection":
+            self._build_connection_tab()
+        elif tab_name == "Publish":
+            self._build_publish_tab()
+            self._refresh_pub_history_ui()
+        elif tab_name == "Subscribe":
+            self._build_subscribe_tab()
+            self._refresh_sub_history_ui()
+            self._refresh_subscriptions_ui()
+        elif tab_name == "Buttons":
+            self._build_buttons_tab()
+            self._refresh_quick_buttons_ui()
+
     def update_theme_button_icon(self, mode: str):
         self.theme_btn.configure(text="☀️ Light" if mode.lower() == "dark" else "🌙 Dark")
         bg_color = "#cbd5e1" if mode.lower() == "light" else "#1e293b"
-        if hasattr(self, 'paned_window'):
+        if hasattr(self, "paned_window"):
             self.paned_window.configure(bg=bg_color)
 
     def _build_connection_tab(self):
@@ -200,6 +249,10 @@ class MQTTWorkspace(ctk.CTkFrame):
         tab.grid_columnconfigure(1, weight=1)
 
         row = 0
+        ctk.CTkLabel(tab, text="Name", font=self.app.font_normal, text_color=("black", "white")).grid(row=row, column=0, padx=15, pady=8, sticky="w")
+        ctk.CTkEntry(tab, textvariable=self.name_var, font=self.app.font_normal, placeholder_text=f"Workspace {self.workspace_id}").grid(row=row, column=1, padx=15, pady=8, sticky="ew")
+        row += 1
+
         ctk.CTkLabel(tab, text="Host", font=self.app.font_normal, text_color=("black", "white")).grid(row=row, column=0, padx=15, pady=8, sticky="w")
         ctk.CTkEntry(tab, textvariable=self.host_var, font=self.app.font_normal).grid(row=row, column=1, padx=15, pady=8, sticky="ew")
         row += 1
@@ -252,6 +305,8 @@ class MQTTWorkspace(ctk.CTkFrame):
         ctk.CTkLabel(detail_frame, text="Details:", font=self.app.font_bold, text_color=("#475569", "#94a3b8")).pack(side="left", padx=10, pady=5)
         ctk.CTkLabel(detail_frame, textvariable=self.status_detail_var, font=self.app.font_normal, text_color=("#0f172a", "#f8fafc")).pack(side="left", padx=5, pady=5)
 
+        self._set_connected_ui(self.connected)
+
     def _toggle_password_visibility(self):
         self.show_password_var.set(not self.show_password_var.get())
         self.password_entry.configure(show="" if self.show_password_var.get() else "*")
@@ -275,8 +330,13 @@ class MQTTWorkspace(ctk.CTkFrame):
         saved_block.grid(row=2, column=0, padx=10, pady=5, sticky="ew")
         ctk.CTkLabel(saved_block, text="Recent Topics", font=self.app.font_bold, text_color=self.TITLE_COLOR).pack(anchor="w", padx=10, pady=(5, 0))
 
-        self.pub_history_frame = ctk.CTkScrollableFrame(saved_block, height=100, fg_color="transparent",
-                                                        scrollbar_button_color=self.sb_color, scrollbar_button_hover_color=self.sb_hover)
+        self.pub_history_frame = ctk.CTkScrollableFrame(
+            saved_block,
+            height=100,
+            fg_color="transparent",
+            scrollbar_button_color=self.sb_color,
+            scrollbar_button_hover_color=self.sb_hover,
+        )
         self.pub_history_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
         payload_header = ctk.CTkFrame(tab, fg_color="transparent")
@@ -292,7 +352,7 @@ class MQTTWorkspace(ctk.CTkFrame):
             fg_color=self.TEXT_BG,
             corner_radius=6,
             scrollbar_button_color=self.sb_color,
-            scrollbar_button_hover_color=self.sb_hover
+            scrollbar_button_hover_color=self.sb_hover,
         )
         self.payload_text.grid(row=4, column=0, padx=10, pady=(0, 5), sticky="nsew")
         tab.grid_rowconfigure(4, weight=1)
@@ -312,15 +372,38 @@ class MQTTWorkspace(ctk.CTkFrame):
             messagebox.showerror("Invalid JSON", f"Could not parse payload as JSON:\n{e}")
 
     def _refresh_pub_history_ui(self):
-        for w in self.pub_history_frame.winfo_children(): w.destroy()
+        if not hasattr(self, "pub_history_frame"):
+            return
+        for w in self.pub_history_frame.winfo_children():
+            w.destroy()
         for t in self.published_history:
             tag_frame = ctk.CTkFrame(self.pub_history_frame, fg_color=self.ITEM_BG, corner_radius=4)
             tag_frame.pack(fill="x", pady=2)
 
-            del_btn = ctk.CTkButton(tag_frame, text="X", width=28, height=28, font=ctk.CTkFont(size=12, weight="bold"), fg_color="transparent", text_color=("#b91c1c", "#f87171"), hover_color=("#f87171", "#991b1b"), command=lambda t=t: self.remove_pub_history(t))
+            del_btn = ctk.CTkButton(
+                tag_frame,
+                text="X",
+                width=28,
+                height=28,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color="transparent",
+                text_color=("#b91c1c", "#f87171"),
+                hover_color=("#f87171", "#991b1b"),
+                command=lambda t=t: self.remove_pub_history(t),
+            )
             del_btn.pack(side="right", padx=(0, 2))
 
-            btn = ctk.CTkButton(tag_frame, text=self._truncate(t, 35), height=28, font=ctk.CTkFont(size=12), fg_color="transparent", text_color=("black", "white"), hover_color=("#cbd5e1", "#475569"), anchor="w", command=lambda t=t: self.pub_topic_var.set(t))
+            btn = ctk.CTkButton(
+                tag_frame,
+                text=self._truncate(t, 35),
+                height=28,
+                font=ctk.CTkFont(size=12),
+                fg_color="transparent",
+                text_color=("black", "white"),
+                hover_color=("#cbd5e1", "#475569"),
+                anchor="w",
+                command=lambda t=t: self.pub_topic_var.set(t),
+            )
             btn.pack(side="left", fill="x", expand=True, padx=(2, 0))
             Tooltip(btn, text=t)
 
@@ -344,12 +427,17 @@ class MQTTWorkspace(ctk.CTkFrame):
         saved_block.grid(row=1, column=0, padx=10, pady=5, sticky="ew")
         ctk.CTkLabel(saved_block, text="Recent Topics", font=self.app.font_bold, text_color=self.TITLE_COLOR).pack(anchor="w", padx=10, pady=(5, 0))
 
-        self.sub_history_frame = ctk.CTkScrollableFrame(saved_block, height=100, fg_color="transparent", scrollbar_button_color=self.sb_color, scrollbar_button_hover_color=self.sb_hover)
+        self.sub_history_frame = ctk.CTkScrollableFrame(
+            saved_block,
+            height=100,
+            fg_color="transparent",
+            scrollbar_button_color=self.sb_color,
+            scrollbar_button_hover_color=self.sb_hover,
+        )
         self.sub_history_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
         tab.grid_rowconfigure(2, weight=1)
 
-        # Standardized card for active subscriptions
         active_block = ctk.CTkFrame(tab, fg_color=self.CARD_BG, border_width=1, border_color=self.CARD_BORDER, corner_radius=6)
         active_block.grid(row=2, column=0, padx=10, pady=5, sticky="nsew")
 
@@ -358,19 +446,47 @@ class MQTTWorkspace(ctk.CTkFrame):
         ctk.CTkLabel(header_row, text="Active Subscriptions", font=self.app.font_bold, text_color=self.TITLE_COLOR).pack(side="left")
         ctk.CTkButton(header_row, text="Unsub All", width=80, height=22, font=ctk.CTkFont(size=11), fg_color="#64748b", hover_color="#475569", command=self.unsubscribe_all).pack(side="right")
 
-        self.subscriptions_list = ctk.CTkScrollableFrame(active_block, fg_color="transparent", scrollbar_button_color=self.sb_color, scrollbar_button_hover_color=self.sb_hover)
+        self.subscriptions_list = ctk.CTkScrollableFrame(
+            active_block,
+            fg_color="transparent",
+            scrollbar_button_color=self.sb_color,
+            scrollbar_button_hover_color=self.sb_hover,
+        )
         self.subscriptions_list.pack(fill="both", expand=True, padx=5, pady=5)
 
     def _refresh_sub_history_ui(self):
-        for w in self.sub_history_frame.winfo_children(): w.destroy()
+        if not hasattr(self, "sub_history_frame"):
+            return
+        for w in self.sub_history_frame.winfo_children():
+            w.destroy()
         for t in self.subscribed_history:
             tag_frame = ctk.CTkFrame(self.sub_history_frame, fg_color=self.ITEM_BG, corner_radius=4)
             tag_frame.pack(fill="x", pady=2)
 
-            del_btn = ctk.CTkButton(tag_frame, text="X", width=28, height=28, font=ctk.CTkFont(size=12, weight="bold"), fg_color="transparent", text_color=("#b91c1c", "#f87171"), hover_color=("#f87171", "#991b1b"), command=lambda t=t: self.remove_sub_history(t))
+            del_btn = ctk.CTkButton(
+                tag_frame,
+                text="X",
+                width=28,
+                height=28,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color="transparent",
+                text_color=("#b91c1c", "#f87171"),
+                hover_color=("#f87171", "#991b1b"),
+                command=lambda t=t: self.remove_sub_history(t),
+            )
             del_btn.pack(side="right", padx=(0, 2))
 
-            btn = ctk.CTkButton(tag_frame, text=self._truncate(t, 35), height=28, font=ctk.CTkFont(size=12), fg_color="transparent", text_color=("black", "white"), hover_color=("#cbd5e1", "#475569"), anchor="w", command=lambda t=t: self.sub_topic_var.set(t))
+            btn = ctk.CTkButton(
+                tag_frame,
+                text=self._truncate(t, 35),
+                height=28,
+                font=ctk.CTkFont(size=12),
+                fg_color="transparent",
+                text_color=("black", "white"),
+                hover_color=("#cbd5e1", "#475569"),
+                anchor="w",
+                command=lambda t=t: self.sub_topic_var.set(t),
+            )
             btn.pack(side="left", fill="x", expand=True, padx=(2, 0))
             Tooltip(btn, text=t)
 
@@ -381,12 +497,25 @@ class MQTTWorkspace(ctk.CTkFrame):
             self._refresh_sub_history_ui()
 
     def _refresh_subscriptions_ui(self):
-        for w in self.subscriptions_list.winfo_children(): w.destroy()
+        if not hasattr(self, "subscriptions_list"):
+            return
+        for w in self.subscriptions_list.winfo_children():
+            w.destroy()
         for t in sorted(self.subscriptions):
             f = ctk.CTkFrame(self.subscriptions_list, fg_color=self.ITEM_BG, corner_radius=4)
             f.pack(fill="x", pady=2)
 
-            del_btn = ctk.CTkButton(f, text="X", width=28, height=28, font=ctk.CTkFont(size=12, weight="bold"), fg_color="transparent", text_color=("#b91c1c", "#f87171"), hover_color=("#f87171", "#991b1b"), command=lambda t=t: self.unsubscribe(t))
+            del_btn = ctk.CTkButton(
+                f,
+                text="X",
+                width=28,
+                height=28,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color="transparent",
+                text_color=("#b91c1c", "#f87171"),
+                hover_color=("#f87171", "#991b1b"),
+                command=lambda t=t: self.unsubscribe(t),
+            )
             del_btn.pack(side="right", padx=(0, 2))
 
             lbl = ctk.CTkLabel(f, text=self._truncate(t, 35), font=self.app.font_normal, text_color=("black", "white"), anchor="w")
@@ -420,7 +549,7 @@ class MQTTWorkspace(ctk.CTkFrame):
             fg_color=self.TEXT_BG,
             corner_radius=6,
             scrollbar_button_color=self.sb_color,
-            scrollbar_button_hover_color=self.sb_hover
+            scrollbar_button_hover_color=self.sb_hover,
         )
         self.macro_payload_text.grid(row=2, column=0, padx=10, pady=(0, 5), sticky="ew")
 
@@ -432,7 +561,12 @@ class MQTTWorkspace(ctk.CTkFrame):
 
         ctk.CTkLabel(dash_block, text="Command Dashboard", font=self.app.font_bold, text_color=self.TITLE_COLOR).pack(anchor="w", padx=10, pady=(5, 0))
 
-        self.macro_scroll_zone = ctk.CTkScrollableFrame(dash_block, fg_color="transparent", scrollbar_button_color=self.sb_color, scrollbar_button_hover_color=self.sb_hover)
+        self.macro_scroll_zone = ctk.CTkScrollableFrame(
+            dash_block,
+            fg_color="transparent",
+            scrollbar_button_color=self.sb_color,
+            scrollbar_button_hover_color=self.sb_hover,
+        )
         self.macro_scroll_zone.pack(fill="both", expand=True, padx=5, pady=5)
 
     def add_quick_button(self):
@@ -444,12 +578,7 @@ class MQTTWorkspace(ctk.CTkFrame):
             messagebox.showerror("Validation Error", "Name and Topic are required fields.")
             return
 
-        self.quick_buttons.append({
-            "label": name,
-            "topic": topic,
-            "payload": payload
-        })
-
+        self.quick_buttons.append({"label": name, "topic": topic, "payload": payload})
         self.macro_name_var.set("")
         self.macro_payload_text.delete("1.0", "end")
 
@@ -472,11 +601,13 @@ class MQTTWorkspace(ctk.CTkFrame):
 
         topic = item.get("topic", "").strip()
         payload = item.get("payload", "").strip()
+        if not topic:
+            return
 
-        if not topic: return
-
-        try: qos = int(self.pub_qos_var.get())
-        except ValueError: qos = 0
+        try:
+            qos = int(self.pub_qos_var.get())
+        except ValueError:
+            qos = 0
 
         result = self.client.publish(topic, payload, qos=qos, retain=self.pub_retain_var.get())
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
@@ -485,21 +616,37 @@ class MQTTWorkspace(ctk.CTkFrame):
             self.log(f"QUICK PUB Failed for [{item['label']}], code={result.rc}")
 
     def _refresh_quick_buttons_ui(self):
-        for w in self.macro_scroll_zone.winfo_children(): w.destroy()
+        if not hasattr(self, "macro_scroll_zone"):
+            return
+        for w in self.macro_scroll_zone.winfo_children():
+            w.destroy()
         for idx, item in enumerate(self.quick_buttons):
             f = ctk.CTkFrame(self.macro_scroll_zone, fg_color="transparent")
             f.pack(fill="x", pady=4)
 
-            action_btn = ctk.CTkButton(f, text=item['label'], height=45, corner_radius=6,
-                                       font=ctk.CTkFont(size=15, weight="bold"),
-                                       anchor="center",
-                                       command=lambda i=item: self.execute_quick_button(i))
+            action_btn = ctk.CTkButton(
+                f,
+                text=item["label"],
+                height=45,
+                corner_radius=6,
+                font=ctk.CTkFont(size=15, weight="bold"),
+                anchor="center",
+                command=lambda i=item: self.execute_quick_button(i),
+            )
             action_btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
 
-            del_btn = ctk.CTkButton(f, text="X", width=45, height=45, corner_radius=6,
-                                    font=ctk.CTkFont(size=15, weight="bold"),
-                                    fg_color="#ef4444", hover_color="#dc2626", text_color="white",
-                                    command=lambda index=idx: self.delete_quick_button(index))
+            del_btn = ctk.CTkButton(
+                f,
+                text="X",
+                width=45,
+                height=45,
+                corner_radius=6,
+                font=ctk.CTkFont(size=15, weight="bold"),
+                fg_color="#ef4444",
+                hover_color="#dc2626",
+                text_color="white",
+                command=lambda index=idx: self.delete_quick_button(index),
+            )
             del_btn.pack(side="right")
 
             Tooltip(action_btn, text=f"Topic: {item['topic']}\nPayload: {item['payload']}")
@@ -513,7 +660,15 @@ class MQTTWorkspace(ctk.CTkFrame):
 
         ctk.CTkLabel(top, text="Logs", font=self.app.font_bold, text_color=("black", "white")).pack(side="left", padx=12, pady=5)
 
-        self.scroll_check = ctk.CTkCheckBox(top, text="Auto-scroll", variable=self.auto_scroll_var, font=ctk.CTkFont(size=12), text_color=("black", "white"), checkbox_width=16, checkbox_height=16)
+        self.scroll_check = ctk.CTkCheckBox(
+            top,
+            text="Auto-scroll",
+            variable=self.auto_scroll_var,
+            font=ctk.CTkFont(size=12),
+            text_color=("black", "white"),
+            checkbox_width=16,
+            checkbox_height=16,
+        )
         self.scroll_check.pack(side="left", padx=8, pady=5)
 
         filter_box = ctk.CTkFrame(top, fg_color="transparent")
@@ -532,13 +687,17 @@ class MQTTWorkspace(ctk.CTkFrame):
             border_color=self.CARD_BORDER,
             corner_radius=6,
             scrollbar_button_color=self.sb_color,
-            scrollbar_button_hover_color=self.sb_hover
+            scrollbar_button_hover_color=self.sb_hover,
         )
         self.log_text.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         self.log_text.configure(state="disabled")
 
     # --- MQTT Client Logic ---
     def load_workspace_data(self, data: dict):
+        saved_name = data.get("name", f"Workspace {self.workspace_id}")
+        self.name_var.set(saved_name)
+        self.app.update_workspace_title(self.workspace_id, saved_name)
+
         self.host_var.set(data.get("host", ""))
         self.port_var.set(str(data.get("port", "1883")))
         self.username_var.set(data.get("username", ""))
@@ -555,9 +714,13 @@ class MQTTWorkspace(ctk.CTkFrame):
 
         left_width = data.get("left_panel_width")
         if left_width and isinstance(left_width, int) and left_width > 10:
-            try: self.paned_window.paneconfigure(self.left_panel, width=left_width)
-            except: pass
+            try:
+                self.paned_window.paneconfigure(self.left_panel, width=left_width)
+            except Exception:
+                pass
 
+        # Only refresh tabs whose widgets already exist; tabs built later pick
+        # up this data automatically inside _ensure_tab_built().
         self._refresh_subscriptions_ui()
         self._refresh_pub_history_ui()
         self._refresh_sub_history_ui()
@@ -565,6 +728,7 @@ class MQTTWorkspace(ctk.CTkFrame):
 
     def get_workspace_data(self) -> dict:
         return {
+            "name": self.name_var.get().strip() or f"Workspace {self.workspace_id}",
             "host": self.host_var.get(),
             "port": self.port_var.get(),
             "username": self.username_var.get(),
@@ -578,11 +742,12 @@ class MQTTWorkspace(ctk.CTkFrame):
             "subscribed_history": self.subscribed_history,
             "auto_scroll": self.auto_scroll_var.get(),
             "quick_buttons": self.quick_buttons,
-            "left_panel_width": self.left_panel.winfo_width()
+            "left_panel_width": self.left_panel.winfo_width(),
         }
 
     def connect(self):
-        if self.connected: return
+        if self.connected:
+            return
         self._cancel_reconnect()
         self.manual_disconnect = False
 
@@ -639,8 +804,10 @@ class MQTTWorkspace(ctk.CTkFrame):
 
     def _cancel_reconnect(self):
         if self.reconnect_job is not None:
-            try: self.after_cancel(self.reconnect_job)
-            except Exception: pass
+            try:
+                self.after_cancel(self.reconnect_job)
+            except Exception:
+                pass
             self.reconnect_job = None
 
     def _maybe_schedule_reconnect(self):
@@ -667,12 +834,16 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.event_queue.put(("log", f"MSG {msg.topic}: {payload}"))
 
     def publish_message(self):
-        if not self.connected or not self.client: return
+        if not self.connected or not self.client:
+            return
         topic = self.pub_topic_var.get().strip()
-        if not topic: return
+        if not topic:
+            return
 
-        try: qos = int(self.pub_qos_var.get())
-        except ValueError: qos = 0
+        try:
+            qos = int(self.pub_qos_var.get())
+        except ValueError:
+            qos = 0
 
         payload = self.payload_text.get("1.0", "end").strip()
         result = self.client.publish(topic, payload, qos=qos, retain=self.pub_retain_var.get())
@@ -692,10 +863,13 @@ class MQTTWorkspace(ctk.CTkFrame):
 
     def add_subscription(self):
         topic = self.sub_topic_var.get().strip()
-        if not topic: return
+        if not topic:
+            return
 
-        try: qos = int(self.sub_qos_var.get())
-        except ValueError: qos = 0
+        try:
+            qos = int(self.sub_qos_var.get())
+        except ValueError:
+            qos = 0
 
         if self.connected and self.client:
             self.client.subscribe(topic, qos=qos)
@@ -730,7 +904,7 @@ class MQTTWorkspace(ctk.CTkFrame):
 
     def _process_event_queue(self):
         processed_count = 0
-        while processed_count < 25:
+        while processed_count < 30:
             try:
                 ev, data = self.event_queue.get_nowait()
                 processed_count += 1
@@ -751,7 +925,10 @@ class MQTTWorkspace(ctk.CTkFrame):
                     self._maybe_schedule_reconnect()
             except queue.Empty:
                 break
-        self.after(100, self._process_event_queue)
+
+        # Adaptive delay: 80ms if connected or has incoming queue events, 300ms if idle
+        next_delay = 80 if (self.connected or not self.event_queue.empty()) else 300
+        self.after(next_delay, self._process_event_queue)
 
     def log(self, msg):
         line = f"[{time.strftime('%H:%M:%S')}] {msg}"
@@ -784,6 +961,8 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.log_text.configure(state="disabled")
 
     def _set_connected_ui(self, connected, pending=False):
+        if not hasattr(self, "btn_connect"):
+            return
         self.btn_connect.configure(state="disabled" if (connected or pending) else "normal")
         self.btn_disconnect.configure(state="normal" if (connected or pending) else "disabled")
         if connected:
@@ -798,6 +977,8 @@ class MQTTWorkspace(ctk.CTkFrame):
 class MQTTControlCenter(ctk.CTk):
     def __init__(self):
         super().__init__()
+        # Hide window while building heavy widget tree to eliminate visual stutter and speed up load
+        self.withdraw()
 
         self.appearance_mode = "light"
         ctk.set_appearance_mode(self.appearance_mode)
@@ -805,67 +986,135 @@ class MQTTControlCenter(ctk.CTk):
 
         self.font_normal = ctk.CTkFont(size=14)
         self.font_bold = ctk.CTkFont(size=14, weight="bold")
-        self.font_header = ctk.CTkFont(size=16, weight="bold")
+        self.font_header = ctk.CTkFont(size=13, weight="bold")
         self.font_log = ctk.CTkFont(family="Consolas", size=13)
 
         self.title(f"{APP_TITLE} v{APP_VERSION}")
-        self.geometry("1180x750")
-        self.minsize(980, 620)
+        self.geometry("1260x760")
+        self.minsize(1050, 620)
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
-        self.workspace_tabs = ctk.CTkTabview(self, corner_radius=4)
+        # command= fires on tab switch so we can lazily build the workspace
+        # that just became visible, instead of building all of them upfront.
+        self.workspace_tabs = ctk.CTkTabview(self, corner_radius=4, command=self._on_workspace_tab_changed)
         self.workspace_tabs.pack(fill="both", expand=True, padx=5, pady=5)
 
-        try:
-            self.workspace_tabs._segmented_button.configure(font=self.font_header)
-        except AttributeError: pass
+        # workspaces[i] is None until that workspace's tab has actually been opened.
+        self.workspaces: list[Optional[MQTTWorkspace]] = []
+        self._workspace_tab_objs: dict[int, "ctk.CTkFrame"] = {}
+        self._saved_workspace_data: list[dict] = []
 
-        self.workspaces: list[MQTTWorkspace] = []
+        # Load raw saved data first (cheap - just JSON parsing) so we know how
+        # many workspaces existed and can hand data to each workspace as it's built.
+        num_workspaces = DEFAULT_WORKSPACES
+        if SETTINGS_FILE.exists():
+            try:
+                root_data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+                self._saved_workspace_data = root_data.get("workspaces", [])
+                num_workspaces = max(DEFAULT_WORKSPACES, len(self._saved_workspace_data))
 
-        for i in range(1, 6):
+                saved_theme = root_data.get("appearance_mode", "light")
+                if saved_theme in ["light", "dark"]:
+                    self.appearance_mode = saved_theme
+                    ctk.set_appearance_mode(self.appearance_mode)
+            except Exception:
+                pass
+
+        # Only create empty tab containers here - actual workspace widgets are
+        # built lazily (see _build_workspace / _on_workspace_tab_changed).
+        for i in range(1, num_workspaces + 1):
             tab_title = f"Workspace {i}"
             tab_obj = self.workspace_tabs.add(tab_title)
+            self._workspace_tab_objs[i] = tab_obj
+            self.workspaces.append(None)
 
-            ws = MQTTWorkspace(tab_obj, app_instance=self, workspace_id=i)
-            ws.pack(fill="both", expand=True)
-            self.workspaces.append(ws)
+        # Stretch tabs evenly across available top width
+        try:
+            sb = self.workspace_tabs._segmented_button
+            sb.configure(font=self.font_header, height=36)
+            sb.grid(sticky="ew", padx=8, pady=(4, 0))
+            for col in range(num_workspaces):
+                sb.grid_columnconfigure(col, weight=1)
+        except AttributeError:
+            pass
 
-        self._load_settings()
+        # Apply saved custom names to every tab label right away - this is just
+        # cheap text on the tab button, so it's fine to do for all workspaces
+        # even before their full UI is built.
+        for i in range(1, num_workspaces + 1):
+            idx = i - 1
+            if idx < len(self._saved_workspace_data):
+                saved_name = self._saved_workspace_data[idx].get("name")
+                if saved_name:
+                    self.update_workspace_title(i, saved_name)
+
+        # Only build the workspace that's actually visible at startup.
+        self._build_workspace(1)
+
+        # Render layout in memory, then display window instantly
+        self.update_idletasks()
+        self.deiconify()
+
+    def _on_workspace_tab_changed(self):
+        name = self.workspace_tabs.get()
+        try:
+            workspace_id = int(name.rsplit(" ", 1)[-1])
+        except (ValueError, IndexError):
+            return
+        if 1 <= workspace_id <= len(self.workspaces) and self.workspaces[workspace_id - 1] is None:
+            self._build_workspace(workspace_id)
+
+    def _build_workspace(self, workspace_id: int):
+        idx = workspace_id - 1
+        tab_obj = self._workspace_tab_objs[workspace_id]
+        ws = MQTTWorkspace(tab_obj, app_instance=self, workspace_id=workspace_id)
+        ws.pack(fill="both", expand=True)
+        self.workspaces[idx] = ws
+
+        if idx < len(self._saved_workspace_data):
+            ws.load_workspace_data(self._saved_workspace_data[idx])
+
+        # Theme may have been switched to "dark" before this workspace existed.
+        ws.update_theme_button_icon(self.appearance_mode)
+        return ws
+
+    def update_workspace_title(self, workspace_id: int, title: str):
+        tab_key = f"Workspace {workspace_id}"
+        display_title = title.strip() or tab_key
+        if len(display_title) > 16:
+            display_title = display_title[:13] + "..."
+        try:
+            btn = self.workspace_tabs._segmented_button._buttons_dict.get(tab_key)
+            if btn:
+                btn.configure(text=display_title)
+        except Exception:
+            pass
 
     def toggle_theme(self):
         self.appearance_mode = "dark" if self.appearance_mode == "light" else "light"
         ctk.set_appearance_mode(self.appearance_mode)
 
         for ws in self.workspaces:
-            ws.update_theme_button_icon(self.appearance_mode)
+            if ws is not None:
+                ws.update_theme_button_icon(self.appearance_mode)
 
         self.save_settings()
 
-    def _load_settings(self):
-        if SETTINGS_FILE.exists():
-            try:
-                root_data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-
-                saved_theme = root_data.get("appearance_mode", "light")
-                if saved_theme in ["light", "dark"] and saved_theme != self.appearance_mode:
-                    self.appearance_mode = saved_theme
-                    ctk.set_appearance_mode(self.appearance_mode)
-                    for ws in self.workspaces:
-                        ws.update_theme_button_icon(self.appearance_mode)
-
-                ws_list_data = root_data.get("workspaces", [])
-                for idx, ws in enumerate(self.workspaces):
-                    if idx < len(ws_list_data):
-                        ws.load_workspace_data(ws_list_data[idx])
-            except Exception:
-                pass
-
     def save_settings(self):
-        workspaces_data = [ws.get_workspace_data() for ws in self.workspaces]
+        workspaces_data = []
+        for idx, ws in enumerate(self.workspaces):
+            if ws is not None:
+                workspaces_data.append(ws.get_workspace_data())
+            elif idx < len(self._saved_workspace_data):
+                # Never-opened workspace: keep whatever was already on disk.
+                workspaces_data.append(self._saved_workspace_data[idx])
+            else:
+                workspaces_data.append({})
+
         root_data = {
             "appearance_mode": self.appearance_mode,
-            "workspaces": workspaces_data
+            "workspaces": workspaces_data,
         }
         try:
             SETTINGS_FILE.write_text(json.dumps(root_data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -875,6 +1124,8 @@ class MQTTControlCenter(ctk.CTk):
     def on_close(self):
         self.save_settings()
         for ws in self.workspaces:
+            if ws is None:
+                continue
             ws.manual_disconnect = True
             ws._cancel_reconnect()
             if ws.client:
