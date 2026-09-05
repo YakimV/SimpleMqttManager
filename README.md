@@ -5,7 +5,7 @@ A simple GUI tool for configuring and debugging MQTT devices during development.
 Created for personal use to conveniently check topics, view telemetry, and send test commands.
 
 Allows you to:
-* Work with multiple brokers/devices simultaneously (5 separate tabs).
+* Work with multiple brokers/devices simultaneously.
 * Subscribe to topics and send messages (QoS, Retain).
 * Create custom buttons to quickly send frequently used commands.
 * Save the history of topics, subscriptions, and settings between sessions.
