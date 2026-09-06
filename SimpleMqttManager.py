@@ -110,6 +110,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.sub_qos_var = tk.StringVar(value="0")
         self.auto_scroll_var = tk.BooleanVar(value=True)
         self.log_filter_var = tk.StringVar(value="")
+        self.separate_logs_var = tk.BooleanVar(value=False)   # <-- НОВА ГАЛОЧКА
 
         # Color palettes
         self.CARD_BG = ("#ffffff", "#1e293b")
@@ -174,7 +175,7 @@ class MQTTWorkspace(ctk.CTkFrame):
             self,
             orient="horizontal",
             bd=0,
-            sashwidth=4,
+            sashwidth=10,
             bg=paned_bg,
             sashcursor="sb_h_double_arrow",
         )
@@ -651,6 +652,7 @@ class MQTTWorkspace(ctk.CTkFrame):
 
             Tooltip(action_btn, text=f"Topic: {item['topic']}\nPayload: {item['payload']}")
 
+
     def _build_logs_section(self):
         self.logs_container.grid_rowconfigure(1, weight=1)
         self.logs_container.grid_columnconfigure(0, weight=1)
@@ -660,6 +662,7 @@ class MQTTWorkspace(ctk.CTkFrame):
 
         ctk.CTkLabel(top, text="Logs", font=self.app.font_bold, text_color=("black", "white")).pack(side="left", padx=12, pady=5)
 
+        # Auto-scroll
         self.scroll_check = ctk.CTkCheckBox(
             top,
             text="Auto-scroll",
@@ -671,10 +674,24 @@ class MQTTWorkspace(ctk.CTkFrame):
         )
         self.scroll_check.pack(side="left", padx=8, pady=5)
 
+        # НОВА ГАЛОЧКА: розділяти рядком
+        self.separate_check = ctk.CTkCheckBox(
+            top,
+            text="Separate by line",
+            variable=self.separate_logs_var,
+            font=ctk.CTkFont(size=12),
+            text_color=("black", "white"),
+            checkbox_width=16,
+            checkbox_height=16,
+        )
+        self.separate_check.pack(side="left", padx=8, pady=5)
+        Tooltip(self.separate_check, "Insert a blank line between different entries in the log")
+
+        # Фільтр
         filter_box = ctk.CTkFrame(top, fg_color="transparent")
         filter_box.pack(side="left", padx=10, pady=5)
         ctk.CTkLabel(filter_box, text="Filter:", font=self.app.font_bold, text_color=("black", "white")).pack(side="left", padx=(0, 5))
-        ctk.CTkEntry(filter_box, textvariable=self.log_filter_var, placeholder_text="Search logs...", width=140, font=ctk.CTkFont(size=12)).pack(side="left")
+        ctk.CTkEntry(filter_box, textvariable=self.log_filter_var, placeholder_text="Search...", width=140, font=ctk.CTkFont(size=12)).pack(side="left")
 
         ctk.CTkButton(top, text="Clear", width=70, height=26, font=ctk.CTkFont(size=12), fg_color="#64748b", command=self.clear_log).pack(side="right", padx=12, pady=5)
 
@@ -692,7 +709,52 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.log_text.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         self.log_text.configure(state="disabled")
 
-    # --- MQTT Client Logic ---
+    def log(self, msg: str):
+        line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+
+      
+        if self.separate_logs_var.get() and self.all_log_lines:
+            last_line = self.all_log_lines[-1]
+            if last_line.strip() != "":
+                self.all_log_lines.append("")
+                self.log_text.configure(state="normal")
+                self.log_text.insert("end", "\n")
+                if self.auto_scroll_var.get():
+                    self.log_text.see("end")
+                self.log_text.configure(state="disabled")
+
+        self.all_log_lines.append(line)
+        if len(self.all_log_lines) > 5000:
+            self.all_log_lines.pop(0)
+
+        filt = self.log_filter_var.get().strip().lower()
+        if not filt or filt in line.lower():
+            self.log_text.configure(state="normal")
+            self.log_text.insert("end", line + "\n")
+            if self.auto_scroll_var.get():
+                self.log_text.see("end")
+            self.log_text.configure(state="disabled")
+
+    def _render_log(self):
+        filt = self.log_filter_var.get().strip().lower()
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
+        for line in self.all_log_lines:
+            if not filt or filt in line.lower():
+                self.log_text.insert("end", line + "\n")
+        if self.auto_scroll_var.get():
+            self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def clear_log(self):
+        self.all_log_lines.clear()
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.configure(state="disabled")
+
+    # ------------------------------------------------------------
+    #  MQTT Client Logic
+    # ------------------------------------------------------------
     def load_workspace_data(self, data: dict):
         saved_name = data.get("name", f"Workspace {self.workspace_id}")
         self.name_var.set(saved_name)
@@ -711,6 +773,8 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.subscribed_history = data.get("subscribed_history", [])
         self.auto_scroll_var.set(data.get("auto_scroll", True))
         self.quick_buttons = data.get("quick_buttons", [])
+        # Завантажуємо стан галочки "Розділяти рядком"
+        self.separate_logs_var.set(data.get("separate_logs", False))
 
         left_width = data.get("left_panel_width")
         if left_width and isinstance(left_width, int) and left_width > 10:
@@ -719,8 +783,6 @@ class MQTTWorkspace(ctk.CTkFrame):
             except Exception:
                 pass
 
-        # Only refresh tabs whose widgets already exist; tabs built later pick
-        # up this data automatically inside _ensure_tab_built().
         self._refresh_subscriptions_ui()
         self._refresh_pub_history_ui()
         self._refresh_sub_history_ui()
@@ -743,6 +805,7 @@ class MQTTWorkspace(ctk.CTkFrame):
             "auto_scroll": self.auto_scroll_var.get(),
             "quick_buttons": self.quick_buttons,
             "left_panel_width": self.left_panel.winfo_width(),
+            "separate_logs": self.separate_logs_var.get(), 
         }
 
     def connect(self):
@@ -926,39 +989,8 @@ class MQTTWorkspace(ctk.CTkFrame):
             except queue.Empty:
                 break
 
-        # Adaptive delay: 80ms if connected or has incoming queue events, 300ms if idle
         next_delay = 80 if (self.connected or not self.event_queue.empty()) else 300
         self.after(next_delay, self._process_event_queue)
-
-    def log(self, msg):
-        line = f"[{time.strftime('%H:%M:%S')}] {msg}"
-        self.all_log_lines.append(line)
-        if len(self.all_log_lines) > 5000:
-            self.all_log_lines.pop(0)
-        filt = self.log_filter_var.get().strip().lower()
-        if not filt or filt in line.lower():
-            self.log_text.configure(state="normal")
-            self.log_text.insert("end", line + "\n")
-            if self.auto_scroll_var.get():
-                self.log_text.see("end")
-            self.log_text.configure(state="disabled")
-
-    def _render_log(self):
-        filt = self.log_filter_var.get().strip().lower()
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", "end")
-        for line in self.all_log_lines:
-            if not filt or filt in line.lower():
-                self.log_text.insert("end", line + "\n")
-        if self.auto_scroll_var.get():
-            self.log_text.see("end")
-        self.log_text.configure(state="disabled")
-
-    def clear_log(self):
-        self.all_log_lines.clear()
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.configure(state="disabled")
 
     def _set_connected_ui(self, connected, pending=False):
         if not hasattr(self, "btn_connect"):

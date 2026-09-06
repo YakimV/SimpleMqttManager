@@ -6,6 +6,7 @@ __pycache__/
 
 config/settings.json
 config/*copy*
+config/*backup*
 
 v*.py
 !SimpleMqttManager.py
