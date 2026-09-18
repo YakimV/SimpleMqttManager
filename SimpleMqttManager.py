@@ -82,11 +82,10 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.published_history: list[str] = []
         self.subscribed_history: list[str] = []
         self.quick_buttons: list[dict] = []
-        self.all_log_lines: list[str] = []
+        self.raw_logs: list[tuple[str, str]] = []
 
         # Tracks which inner tabs have had their widgets built (lazy build)
         self._built_tabs: set[str] = set()
-        # Pending saved data, applied to a tab's widgets once that tab is built
         self._pending_data: Optional[dict] = None
 
         # Local variables
@@ -110,7 +109,8 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.sub_qos_var = tk.StringVar(value="0")
         self.auto_scroll_var = tk.BooleanVar(value=True)
         self.log_filter_var = tk.StringVar(value="")
-        self.separate_logs_var = tk.BooleanVar(value=False)   # <-- НОВА ГАЛОЧКА
+        self.separate_logs_var = tk.BooleanVar(value=False)
+        self.format_json_var = tk.BooleanVar(value=False)
 
         # Color palettes
         self.CARD_BG = ("#ffffff", "#1e293b")
@@ -124,6 +124,8 @@ class MQTTWorkspace(ctk.CTkFrame):
 
         self.name_var.trace_add("write", lambda *a: self._on_name_change())
         self.log_filter_var.trace_add("write", lambda *a: self._render_log())
+        self.separate_logs_var.trace_add("write", lambda *a: self._render_log())
+        self.format_json_var.trace_add("write", lambda *a: self._render_log())
 
         self._build_ui()
         self.after(200, self._process_event_queue)
@@ -188,8 +190,6 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.paned_window.add(self.left_panel, minsize=350, width=420)
         self.paned_window.add(self.right_panel, minsize=300, width=680)
 
-        # NOTE: command= fires whenever the visible inner tab changes, so we can
-        # build that tab's widgets lazily instead of building all four up front.
         self.tabs = ctk.CTkTabview(
             self.left_panel,
             corner_radius=0,
@@ -203,7 +203,6 @@ class MQTTWorkspace(ctk.CTkFrame):
         except AttributeError:
             pass
 
-        # Only create the empty tab containers here - contents are built lazily.
         self.tabs.add("Connection")
         self.tabs.add("Publish")
         self.tabs.add("Subscribe")
@@ -214,8 +213,6 @@ class MQTTWorkspace(ctk.CTkFrame):
         self._build_logs_section()
 
         self._set_connected_ui(False)
-
-        # Build only the tab that's visible right now (Connection, by default).
         self._ensure_tab_built(self.tabs.get())
 
     def _on_inner_tab_changed(self):
@@ -652,7 +649,6 @@ class MQTTWorkspace(ctk.CTkFrame):
 
             Tooltip(action_btn, text=f"Topic: {item['topic']}\nPayload: {item['payload']}")
 
-
     def _build_logs_section(self):
         self.logs_container.grid_rowconfigure(1, weight=1)
         self.logs_container.grid_columnconfigure(0, weight=1)
@@ -674,7 +670,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         )
         self.scroll_check.pack(side="left", padx=8, pady=5)
 
-        # НОВА ГАЛОЧКА: розділяти рядком
+        # Separate by line
         self.separate_check = ctk.CTkCheckBox(
             top,
             text="Separate by line",
@@ -687,7 +683,20 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.separate_check.pack(side="left", padx=8, pady=5)
         Tooltip(self.separate_check, "Insert a blank line between different entries in the log")
 
-        # Фільтр
+        # Format JSON
+        self.format_json_check = ctk.CTkCheckBox(
+            top,
+            text="Format JSON",
+            variable=self.format_json_var,
+            font=ctk.CTkFont(size=12),
+            text_color=("black", "white"),
+            checkbox_width=16,
+            checkbox_height=16,
+        )
+        self.format_json_check.pack(side="left", padx=8, pady=5)
+        Tooltip(self.format_json_check, "Pretty-print and indent JSON payloads")
+
+        # Filter
         filter_box = ctk.CTkFrame(top, fg_color="transparent")
         filter_box.pack(side="left", padx=10, pady=5)
         ctk.CTkLabel(filter_box, text="Filter:", font=self.app.font_bold, text_color=("black", "white")).pack(side="left", padx=(0, 5))
@@ -709,28 +718,53 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.log_text.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         self.log_text.configure(state="disabled")
 
+    def _format_message(self, msg: str) -> str:
+        if not self.format_json_var.get():
+            return msg
+
+        if msg.startswith("MSG ") and ": " in msg:
+            prefix, payload = msg.split(": ", 1)
+            payload_clean = payload.strip()
+            if (payload_clean.startswith("{") and payload_clean.endswith("}")) or \
+               (payload_clean.startswith("[") and payload_clean.endswith("]")):
+                try:
+                    parsed = json.loads(payload_clean)
+                    pretty = json.dumps(parsed, indent=2, ensure_ascii=False)
+                    return f"{prefix}:\n{pretty}"
+                except Exception:
+                    pass
+
+        msg_clean = msg.strip()
+        if (msg_clean.startswith("{") and msg_clean.endswith("}")) or \
+           (msg_clean.startswith("[") and msg_clean.endswith("]")):
+            try:
+                parsed = json.loads(msg_clean)
+                pretty = json.dumps(parsed, indent=2, ensure_ascii=False)
+                return f"\n{pretty}"
+            except Exception:
+                pass
+
+        return msg
+
     def log(self, msg: str):
-        line = f"[{time.strftime('%H:%M:%S')}] {msg}"
-
-      
-        if self.separate_logs_var.get() and self.all_log_lines:
-            last_line = self.all_log_lines[-1]
-            if last_line.strip() != "":
-                self.all_log_lines.append("")
-                self.log_text.configure(state="normal")
-                self.log_text.insert("end", "\n")
-                if self.auto_scroll_var.get():
-                    self.log_text.see("end")
-                self.log_text.configure(state="disabled")
-
-        self.all_log_lines.append(line)
-        if len(self.all_log_lines) > 5000:
-            self.all_log_lines.pop(0)
+        t_str = time.strftime("%H:%M:%S")
+        self.raw_logs.append((t_str, msg))
+        if len(self.raw_logs) > 5000:
+            self.raw_logs.pop(0)
 
         filt = self.log_filter_var.get().strip().lower()
-        if not filt or filt in line.lower():
+        formatted_msg = self._format_message(msg)
+        full_line = f"[{t_str}] {formatted_msg}"
+
+        if not filt or filt in full_line.lower():
             self.log_text.configure(state="normal")
-            self.log_text.insert("end", line + "\n")
+            current_text = self.log_text.get("1.0", "end-1c")
+            if current_text:
+                delim = "\n\n" if self.separate_logs_var.get() else "\n"
+                self.log_text.insert("end", delim + full_line)
+            else:
+                self.log_text.insert("end", full_line)
+
             if self.auto_scroll_var.get():
                 self.log_text.see("end")
             self.log_text.configure(state="disabled")
@@ -739,15 +773,24 @@ class MQTTWorkspace(ctk.CTkFrame):
         filt = self.log_filter_var.get().strip().lower()
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
-        for line in self.all_log_lines:
-            if not filt or filt in line.lower():
-                self.log_text.insert("end", line + "\n")
+
+        lines_to_render = []
+        for t_str, raw_msg in self.raw_logs:
+            formatted_msg = self._format_message(raw_msg)
+            full_line = f"[{t_str}] {formatted_msg}"
+            if not filt or filt in full_line.lower():
+                lines_to_render.append(full_line)
+
+        if lines_to_render:
+            delim = "\n\n" if self.separate_logs_var.get() else "\n"
+            self.log_text.insert("end", delim.join(lines_to_render) + "\n")
+
         if self.auto_scroll_var.get():
             self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
     def clear_log(self):
-        self.all_log_lines.clear()
+        self.raw_logs.clear()
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
@@ -773,8 +816,8 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.subscribed_history = data.get("subscribed_history", [])
         self.auto_scroll_var.set(data.get("auto_scroll", True))
         self.quick_buttons = data.get("quick_buttons", [])
-        # Завантажуємо стан галочки "Розділяти рядком"
         self.separate_logs_var.set(data.get("separate_logs", False))
+        self.format_json_var.set(data.get("format_json", False))
 
         left_width = data.get("left_panel_width")
         if left_width and isinstance(left_width, int) and left_width > 10:
@@ -805,7 +848,8 @@ class MQTTWorkspace(ctk.CTkFrame):
             "auto_scroll": self.auto_scroll_var.get(),
             "quick_buttons": self.quick_buttons,
             "left_panel_width": self.left_panel.winfo_width(),
-            "separate_logs": self.separate_logs_var.get(), 
+            "separate_logs": self.separate_logs_var.get(),
+            "format_json": self.format_json_var.get(),
         }
 
     def connect(self):
@@ -1009,7 +1053,6 @@ class MQTTWorkspace(ctk.CTkFrame):
 class MQTTControlCenter(ctk.CTk):
     def __init__(self):
         super().__init__()
-        # Hide window while building heavy widget tree to eliminate visual stutter and speed up load
         self.withdraw()
 
         self.appearance_mode = "light"
@@ -1027,18 +1070,13 @@ class MQTTControlCenter(ctk.CTk):
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
-        # command= fires on tab switch so we can lazily build the workspace
-        # that just became visible, instead of building all of them upfront.
         self.workspace_tabs = ctk.CTkTabview(self, corner_radius=4, command=self._on_workspace_tab_changed)
         self.workspace_tabs.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # workspaces[i] is None until that workspace's tab has actually been opened.
         self.workspaces: list[Optional[MQTTWorkspace]] = []
         self._workspace_tab_objs: dict[int, "ctk.CTkFrame"] = {}
         self._saved_workspace_data: list[dict] = []
 
-        # Load raw saved data first (cheap - just JSON parsing) so we know how
-        # many workspaces existed and can hand data to each workspace as it's built.
         num_workspaces = DEFAULT_WORKSPACES
         if SETTINGS_FILE.exists():
             try:
@@ -1053,15 +1091,12 @@ class MQTTControlCenter(ctk.CTk):
             except Exception:
                 pass
 
-        # Only create empty tab containers here - actual workspace widgets are
-        # built lazily (see _build_workspace / _on_workspace_tab_changed).
         for i in range(1, num_workspaces + 1):
             tab_title = f"Workspace {i}"
             tab_obj = self.workspace_tabs.add(tab_title)
             self._workspace_tab_objs[i] = tab_obj
             self.workspaces.append(None)
 
-        # Stretch tabs evenly across available top width
         try:
             sb = self.workspace_tabs._segmented_button
             sb.configure(font=self.font_header, height=36)
@@ -1071,9 +1106,6 @@ class MQTTControlCenter(ctk.CTk):
         except AttributeError:
             pass
 
-        # Apply saved custom names to every tab label right away - this is just
-        # cheap text on the tab button, so it's fine to do for all workspaces
-        # even before their full UI is built.
         for i in range(1, num_workspaces + 1):
             idx = i - 1
             if idx < len(self._saved_workspace_data):
@@ -1081,10 +1113,8 @@ class MQTTControlCenter(ctk.CTk):
                 if saved_name:
                     self.update_workspace_title(i, saved_name)
 
-        # Only build the workspace that's actually visible at startup.
         self._build_workspace(1)
 
-        # Render layout in memory, then display window instantly
         self.update_idletasks()
         self.deiconify()
 
@@ -1107,7 +1137,6 @@ class MQTTControlCenter(ctk.CTk):
         if idx < len(self._saved_workspace_data):
             ws.load_workspace_data(self._saved_workspace_data[idx])
 
-        # Theme may have been switched to "dark" before this workspace existed.
         ws.update_theme_button_icon(self.appearance_mode)
         return ws
 
@@ -1139,7 +1168,6 @@ class MQTTControlCenter(ctk.CTk):
             if ws is not None:
                 workspaces_data.append(ws.get_workspace_data())
             elif idx < len(self._saved_workspace_data):
-                # Never-opened workspace: keep whatever was already on disk.
                 workspaces_data.append(self._saved_workspace_data[idx])
             else:
                 workspaces_data.append({})
