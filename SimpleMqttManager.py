@@ -84,6 +84,10 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.quick_buttons: list[dict] = []
         self.raw_logs: list[tuple[str, str]] = []
 
+        # Panel toggle state per workspace
+        self.left_panel_visible = True
+        self.saved_left_panel_width = 420
+
         # Tracks which inner tabs have had their widgets built (lazy build)
         self._built_tabs: set[str] = set()
         self._pending_data: Optional[dict] = None
@@ -109,7 +113,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.sub_qos_var = tk.StringVar(value="0")
         self.auto_scroll_var = tk.BooleanVar(value=True)
         self.log_filter_var = tk.StringVar(value="")
-        self.separate_logs_var = tk.BooleanVar(value=False)
+        self.separate_logs_var = tk.BooleanVar(value=True)
         self.format_json_var = tk.BooleanVar(value=False)
 
         # Color palettes
@@ -156,6 +160,22 @@ class MQTTWorkspace(ctk.CTkFrame):
 
         ctk.CTkLabel(status_frame, textvariable=self.status_var, font=self.app.font_bold, text_color=("#1e40af", "#60a5fa")).pack(side="left")
 
+        # Sidebar Toggle Button
+        self.toggle_panel_btn = ctk.CTkButton(
+            self.top_bar,
+            text="◀ Panel",
+            width=76,
+            height=26,
+            corner_radius=6,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=("#cbd5e1", "#334155"),
+            hover_color=("#94a3b8", "#475569"),
+            text_color=("black", "white"),
+            command=self.toggle_left_panel,
+        )
+        self.toggle_panel_btn.pack(side="left", padx=(0, 8), pady=3)
+        Tooltip(self.toggle_panel_btn, "Hide / Show Left Panel")
+
         initial_theme_text = "☀️ Light" if ctk.get_appearance_mode().lower() == "dark" else "🌙 Dark"
         self.theme_btn = ctk.CTkButton(
             self.top_bar,
@@ -187,7 +207,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.left_panel = ctk.CTkFrame(self.paned_window, fg_color=panel_fg, corner_radius=0)
         self.right_panel = ctk.CTkFrame(self.paned_window, fg_color=panel_fg, corner_radius=0)
 
-        self.paned_window.add(self.left_panel, minsize=350, width=420)
+        self.paned_window.add(self.left_panel, minsize=350, width=self.saved_left_panel_width)
         self.paned_window.add(self.right_panel, minsize=300, width=680)
 
         self.tabs = ctk.CTkTabview(
@@ -215,6 +235,32 @@ class MQTTWorkspace(ctk.CTkFrame):
         self._set_connected_ui(False)
         self._ensure_tab_built(self.tabs.get())
 
+    def toggle_left_panel(self):
+        self.set_left_panel_visible(not self.left_panel_visible)
+
+    def set_left_panel_visible(self, visible: bool):
+        if visible == self.left_panel_visible:
+            return
+
+        self.left_panel_visible = visible
+
+        if not visible:
+            curr_w = self.left_panel.winfo_width()
+            if curr_w > 50:
+                self.saved_left_panel_width = curr_w
+            self.paned_window.forget(self.left_panel)
+            self.toggle_panel_btn.configure(text="▶ Panel")
+        else:
+            self.paned_window.add(
+                self.left_panel,
+                before=self.right_panel,
+                minsize=350,
+                width=self.saved_left_panel_width,
+            )
+            self.toggle_panel_btn.configure(text="◀ Panel")
+
+        self.app.save_settings()
+
     def _on_inner_tab_changed(self):
         self._ensure_tab_built(self.tabs.get())
 
@@ -241,6 +287,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         bg_color = "#cbd5e1" if mode.lower() == "light" else "#1e293b"
         if hasattr(self, "paned_window"):
             self.paned_window.configure(bg=bg_color)
+        self._setup_log_tags()
 
     def _build_connection_tab(self):
         tab = self.tabs.tab("Connection")
@@ -609,7 +656,7 @@ class MQTTWorkspace(ctk.CTkFrame):
 
         result = self.client.publish(topic, payload, qos=qos, retain=self.pub_retain_var.get())
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
-            self.log(f"QUICK PUB [{item['label']}]: {topic} -> {self._truncate(payload, 40)}")
+            self.log(f"QUICK PUB [{item['label']}]: {topic} -> {payload}")
         else:
             self.log(f"QUICK PUB Failed for [{item['label']}], code={result.rc}")
 
@@ -649,6 +696,9 @@ class MQTTWorkspace(ctk.CTkFrame):
 
             Tooltip(action_btn, text=f"Topic: {item['topic']}\nPayload: {item['payload']}")
 
+    # ------------------------------------------------------------
+    #  Smart Header-Strip Block Log View
+    # ------------------------------------------------------------
     def _build_logs_section(self):
         self.logs_container.grid_rowconfigure(1, weight=1)
         self.logs_container.grid_columnconfigure(0, weight=1)
@@ -670,10 +720,10 @@ class MQTTWorkspace(ctk.CTkFrame):
         )
         self.scroll_check.pack(side="left", padx=8, pady=5)
 
-        # Separate by line
+        # Blocks toggle
         self.separate_check = ctk.CTkCheckBox(
             top,
-            text="Separate by line",
+            text="Blocks",
             variable=self.separate_logs_var,
             font=ctk.CTkFont(size=12),
             text_color=("black", "white"),
@@ -681,7 +731,7 @@ class MQTTWorkspace(ctk.CTkFrame):
             checkbox_height=16,
         )
         self.separate_check.pack(side="left", padx=8, pady=5)
-        Tooltip(self.separate_check, "Insert a blank line between different entries in the log")
+        Tooltip(self.separate_check, "ON: Contrast header strips + indentation\nOFF: Plain text with double line breaks")
 
         # Format JSON
         self.format_json_check = ctk.CTkCheckBox(
@@ -718,33 +768,134 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.log_text.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         self.log_text.configure(state="disabled")
 
-    def _format_message(self, msg: str) -> str:
+        self._setup_log_tags()
+
+    def _setup_log_tags(self):
+        mode = ctk.get_appearance_mode().lower()
+        is_dark = mode == "dark"
+
+        bg_bar = "#1e293b" if is_dark else "#e2e8f0"
+        bg_bar_err = "#3f1717" if is_dark else "#fee2e2"
+
+        c_time = "#64748b" if is_dark else "#64748b"
+        c_badge = "#38bdf8" if is_dark else "#0284c7"
+        c_topic = "#f8fafc" if is_dark else "#0f172a"
+        c_body = "#cbd5e1" if is_dark else "#334155"
+        c_err = "#f87171" if is_dark else "#dc2626"
+
+        c_pub = "#4ade80" if is_dark else "#16a34a"
+
+        tb = getattr(self.log_text, "_textbox", self.log_text)
+
+        tb.tag_config("hdr_time", foreground=c_time, background=bg_bar, spacing1=6, spacing3=3)
+        tb.tag_config("hdr_badge", foreground=c_badge, background=bg_bar, spacing1=6, spacing3=3)
+        tb.tag_config("hdr_topic", foreground=c_topic, background=bg_bar, spacing1=6, spacing3=3)
+
+        tb.tag_config("hdr_pub_badge", foreground=c_pub, background=bg_bar, spacing1=6, spacing3=3)
+            
+        tb.tag_config("hdr_err_time", foreground=c_time, background=bg_bar_err, spacing1=6, spacing3=3)
+        tb.tag_config("hdr_err_badge", foreground=c_err, background=bg_bar_err, spacing1=6, spacing3=3)
+        tb.tag_config("hdr_err_topic", foreground=c_err, background=bg_bar_err, spacing1=6, spacing3=3)
+
+        tb.tag_config("body_text", foreground=c_body, lmargin1=16, lmargin2=16, spacing1=2, spacing3=4)
+        tb.tag_config("body_err", foreground=c_err, lmargin1=16, lmargin2=16, spacing1=2, spacing3=4)
+
+    def _format_payload(self, payload: str) -> str:
+        payload_clean = payload.strip()
+        if not self.format_json_var.get() or not payload_clean:
+            return payload_clean
+
+        if (payload_clean.startswith("{") and payload_clean.endswith("}")) or \
+           (payload_clean.startswith("[") and payload_clean.endswith("]")):
+            try:
+                parsed = json.loads(payload_clean)
+                return json.dumps(parsed, indent=2, ensure_ascii=False)
+            except Exception:
+                pass
+        return payload_clean
+
+    def _format_plain_message(self, msg: str) -> str:
         if not self.format_json_var.get():
             return msg
 
         if msg.startswith("MSG ") and ": " in msg:
             prefix, payload = msg.split(": ", 1)
-            payload_clean = payload.strip()
-            if (payload_clean.startswith("{") and payload_clean.endswith("}")) or \
-               (payload_clean.startswith("[") and payload_clean.endswith("]")):
-                try:
-                    parsed = json.loads(payload_clean)
-                    pretty = json.dumps(parsed, indent=2, ensure_ascii=False)
-                    return f"{prefix}:\n{pretty}"
-                except Exception:
-                    pass
+            formatted = self._format_payload(payload)
+            return f"{prefix}:\n{formatted}" if "\n" in formatted else f"{prefix}: {formatted}"
 
-        msg_clean = msg.strip()
-        if (msg_clean.startswith("{") and msg_clean.endswith("}")) or \
-           (msg_clean.startswith("[") and msg_clean.endswith("]")):
-            try:
-                parsed = json.loads(msg_clean)
-                pretty = json.dumps(parsed, indent=2, ensure_ascii=False)
-                return f"\n{pretty}"
-            except Exception:
-                pass
+        return self._format_payload(msg)
 
-        return msg
+    def _append_log_entry(self, t_str: str, raw_msg: str, is_first: bool = False):
+        tb = getattr(self.log_text, "_textbox", self.log_text)
+        use_blocks = self.separate_logs_var.get()
+
+        if use_blocks:
+            if not is_first:
+                tb.insert("end", "\n")
+
+            badge = "SYS"
+            topic = ""
+            payload = ""
+            is_error = False
+
+            if raw_msg.startswith("MSG ") and ": " in raw_msg:
+                badge = "MSG"
+                prefix, payload = raw_msg.split(": ", 1)
+                topic = prefix[4:].strip()
+
+            elif raw_msg.startswith("PUB: ") or raw_msg.startswith("QUICK PUB"):
+                badge = "QUICK PUB" if raw_msg.startswith("QUICK PUB") else "PUB"
+                if " -> " in raw_msg:
+                    header, payload = raw_msg.split(" -> ", 1)
+                    topic = header.split(": ", 1)[-1].strip() if ": " in header else header
+                else:
+                    payload = raw_msg
+
+            elif raw_msg.startswith("SUB: "):
+                badge = "SUB"
+                topic = raw_msg[5:].strip()
+
+            elif raw_msg.startswith("UNSUB: "):
+                badge = "UNSUB"
+                topic = raw_msg[7:].strip()
+
+            elif raw_msg.startswith("Auto-subscribed to: "):
+                badge = "SUB"
+                topic = raw_msg[20:].strip()
+
+            elif any(k in raw_msg for k in ["Disconnected", "Failed", "failed", "blocked"]):
+                badge = "ERR"
+                payload = raw_msg
+                is_error = True
+
+            else:
+                payload = raw_msg
+
+            t_tag = "hdr_err_time" if is_error else "hdr_time"
+            top_tag = "hdr_err_topic" if is_error else "hdr_topic"
+
+            if is_error:
+                b_tag = "hdr_err_badge"
+            elif badge in ("PUB", "QUICK PUB"):
+                b_tag = "hdr_pub_badge"
+            else:
+                b_tag = "hdr_badge"
+
+            tb.insert("end", f" {t_str}  ", (t_tag,))
+            tb.insert("end", f"{badge:<5} ", (b_tag,))
+            tb.insert("end", f"{topic if topic else ''}\n", (top_tag,))
+
+            formatted_payload = self._format_payload(payload) if payload else ""
+            if formatted_payload:
+                body_tag = "body_err" if is_error else "body_text"
+                tb.insert("end", f"{formatted_payload}\n", (body_tag,))
+
+        else:
+            if not is_first:
+                tb.insert("end", "\n\n")
+
+            formatted_msg = self._format_plain_message(raw_msg)
+            tb.insert("end", f"[{t_str}] {formatted_msg}")
 
     def log(self, msg: str):
         t_str = time.strftime("%H:%M:%S")
@@ -753,17 +904,13 @@ class MQTTWorkspace(ctk.CTkFrame):
             self.raw_logs.pop(0)
 
         filt = self.log_filter_var.get().strip().lower()
-        formatted_msg = self._format_message(msg)
-        full_line = f"[{t_str}] {formatted_msg}"
+        full_text = f"[{t_str}] {msg}".lower()
 
-        if not filt or filt in full_line.lower():
+        if not filt or filt in full_text:
             self.log_text.configure(state="normal")
-            current_text = self.log_text.get("1.0", "end-1c")
-            if current_text:
-                delim = "\n\n" if self.separate_logs_var.get() else "\n"
-                self.log_text.insert("end", delim + full_line)
-            else:
-                self.log_text.insert("end", full_line)
+            tb = getattr(self.log_text, "_textbox", self.log_text)
+            is_first = tb.index("end-1c") == "1.0"
+            self._append_log_entry(t_str, msg, is_first=is_first)
 
             if self.auto_scroll_var.get():
                 self.log_text.see("end")
@@ -774,16 +921,12 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
 
-        lines_to_render = []
+        is_first = True
         for t_str, raw_msg in self.raw_logs:
-            formatted_msg = self._format_message(raw_msg)
-            full_line = f"[{t_str}] {formatted_msg}"
-            if not filt or filt in full_line.lower():
-                lines_to_render.append(full_line)
-
-        if lines_to_render:
-            delim = "\n\n" if self.separate_logs_var.get() else "\n"
-            self.log_text.insert("end", delim.join(lines_to_render) + "\n")
+            full_text = f"[{t_str}] {raw_msg}".lower()
+            if not filt or filt in full_text:
+                self._append_log_entry(t_str, raw_msg, is_first=is_first)
+                is_first = False
 
         if self.auto_scroll_var.get():
             self.log_text.see("end")
@@ -816,13 +959,24 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.subscribed_history = data.get("subscribed_history", [])
         self.auto_scroll_var.set(data.get("auto_scroll", True))
         self.quick_buttons = data.get("quick_buttons", [])
-        self.separate_logs_var.set(data.get("separate_logs", False))
+        self.separate_logs_var.set(data.get("separate_logs", True))
         self.format_json_var.set(data.get("format_json", False))
 
+        # Restore width & visibility state
+        self.left_panel_visible = data.get("left_panel_visible", True)
         left_width = data.get("left_panel_width")
         if left_width and isinstance(left_width, int) and left_width > 10:
+            self.saved_left_panel_width = left_width
+            if self.left_panel_visible:
+                try:
+                    self.paned_window.paneconfigure(self.left_panel, width=left_width)
+                except Exception:
+                    pass
+
+        if not self.left_panel_visible:
             try:
-                self.paned_window.paneconfigure(self.left_panel, width=left_width)
+                self.paned_window.forget(self.left_panel)
+                self.toggle_panel_btn.configure(text="▶ Panel")
             except Exception:
                 pass
 
@@ -832,6 +986,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         self._refresh_quick_buttons_ui()
 
     def get_workspace_data(self) -> dict:
+        left_w = self.left_panel.winfo_width() if self.left_panel_visible else self.saved_left_panel_width
         return {
             "name": self.name_var.get().strip() or f"Workspace {self.workspace_id}",
             "host": self.host_var.get(),
@@ -847,7 +1002,8 @@ class MQTTWorkspace(ctk.CTkFrame):
             "subscribed_history": self.subscribed_history,
             "auto_scroll": self.auto_scroll_var.get(),
             "quick_buttons": self.quick_buttons,
-            "left_panel_width": self.left_panel.winfo_width(),
+            "left_panel_width": left_w,
+            "left_panel_visible": self.left_panel_visible,
             "separate_logs": self.separate_logs_var.get(),
             "format_json": self.format_json_var.get(),
         }
@@ -964,7 +1120,7 @@ class MQTTWorkspace(ctk.CTkFrame):
 
             self.app.save_settings()
             self._refresh_pub_history_ui()
-            self.log(f"PUB: {topic} -> {self._truncate(payload, 20)}")
+            self.log(f"PUB: {topic} -> {payload}")
         else:
             self.log(f"PUB failed: {topic}, rc={result.rc}")
 
