@@ -113,8 +113,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.sub_qos_var = tk.StringVar(value="0")
         self.auto_scroll_var = tk.BooleanVar(value=True)
         self.log_filter_var = tk.StringVar(value="")
-        self.separate_logs_var = tk.BooleanVar(value=True)
-        self.format_json_var = tk.BooleanVar(value=False)
+        self.pretty_log_var = tk.BooleanVar(value=True)
 
         # Color palettes
         self.CARD_BG = ("#ffffff", "#1e293b")
@@ -128,8 +127,7 @@ class MQTTWorkspace(ctk.CTkFrame):
 
         self.name_var.trace_add("write", lambda *a: self._on_name_change())
         self.log_filter_var.trace_add("write", lambda *a: self._render_log())
-        self.separate_logs_var.trace_add("write", lambda *a: self._render_log())
-        self.format_json_var.trace_add("write", lambda *a: self._render_log())
+        self.pretty_log_var.trace_add("write", lambda *a: self._render_log())
 
         self._build_ui()
         self.after(200, self._process_event_queue)
@@ -720,31 +718,18 @@ class MQTTWorkspace(ctk.CTkFrame):
         )
         self.scroll_check.pack(side="left", padx=8, pady=5)
 
-        # Blocks toggle
-        self.separate_check = ctk.CTkCheckBox(
+        # Combined: Pretty Blocks & Format JSON
+        self.pretty_check = ctk.CTkCheckBox(
             top,
-            text="Blocks",
-            variable=self.separate_logs_var,
+            text="Pretty Log",
+            variable=self.pretty_log_var,
             font=ctk.CTkFont(size=12),
             text_color=("black", "white"),
             checkbox_width=16,
             checkbox_height=16,
         )
-        self.separate_check.pack(side="left", padx=8, pady=5)
-        Tooltip(self.separate_check, "ON: Contrast header strips + indentation\nOFF: Plain text with double line breaks")
-
-        # Format JSON
-        self.format_json_check = ctk.CTkCheckBox(
-            top,
-            text="Format JSON",
-            variable=self.format_json_var,
-            font=ctk.CTkFont(size=12),
-            text_color=("black", "white"),
-            checkbox_width=16,
-            checkbox_height=16,
-        )
-        self.format_json_check.pack(side="left", padx=8, pady=5)
-        Tooltip(self.format_json_check, "Pretty-print and indent JSON payloads")
+        self.pretty_check.pack(side="left", padx=8, pady=5)
+        Tooltip(self.pretty_check, "ON: Styled blocks + JSON auto-formatting\nOFF: Compact raw linear text")
 
         # Filter
         filter_box = ctk.CTkFrame(top, fg_color="transparent")
@@ -752,7 +737,13 @@ class MQTTWorkspace(ctk.CTkFrame):
         ctk.CTkLabel(filter_box, text="Filter:", font=self.app.font_bold, text_color=("black", "white")).pack(side="left", padx=(0, 5))
         ctk.CTkEntry(filter_box, textvariable=self.log_filter_var, placeholder_text="Search...", width=140, font=ctk.CTkFont(size=12)).pack(side="left")
 
-        ctk.CTkButton(top, text="Clear", width=70, height=26, font=ctk.CTkFont(size=12), fg_color="#64748b", command=self.clear_log).pack(side="right", padx=12, pady=5)
+        # Clear & Copy buttons
+        self.btn_clear = ctk.CTkButton(top, text="Clear", width=65, height=26, font=ctk.CTkFont(size=12), fg_color="#64748b", hover_color="#475569", command=self.clear_log)
+        self.btn_clear.pack(side="right", padx=(4, 12), pady=5)
+
+        self.btn_copy = ctk.CTkButton(top, text="Copy", width=65, height=26, font=ctk.CTkFont(size=12), fg_color="#334155", hover_color="#475569", command=self.copy_log)
+        self.btn_copy.pack(side="right", padx=(4, 4), pady=5)
+        Tooltip(self.btn_copy, "Copy log contents to clipboard")
 
         self.log_text = ctk.CTkTextbox(
             self.logs_container,
@@ -802,7 +793,7 @@ class MQTTWorkspace(ctk.CTkFrame):
 
     def _format_payload(self, payload: str) -> str:
         payload_clean = payload.strip()
-        if not self.format_json_var.get() or not payload_clean:
+        if not self.pretty_log_var.get() or not payload_clean:
             return payload_clean
 
         if (payload_clean.startswith("{") and payload_clean.endswith("}")) or \
@@ -815,21 +806,13 @@ class MQTTWorkspace(ctk.CTkFrame):
         return payload_clean
 
     def _format_plain_message(self, msg: str) -> str:
-        if not self.format_json_var.get():
-            return msg
-
-        if msg.startswith("MSG ") and ": " in msg:
-            prefix, payload = msg.split(": ", 1)
-            formatted = self._format_payload(payload)
-            return f"{prefix}:\n{formatted}" if "\n" in formatted else f"{prefix}: {formatted}"
-
-        return self._format_payload(msg)
+        return msg.strip()
 
     def _append_log_entry(self, t_str: str, raw_msg: str, is_first: bool = False):
         tb = getattr(self.log_text, "_textbox", self.log_text)
-        use_blocks = self.separate_logs_var.get()
+        use_pretty = self.pretty_log_var.get()
 
-        if use_blocks:
+        if use_pretty:
             if not is_first:
                 tb.insert("end", "\n")
 
@@ -892,10 +875,10 @@ class MQTTWorkspace(ctk.CTkFrame):
 
         else:
             if not is_first:
-                tb.insert("end", "\n\n")
+                tb.insert("end", "\n")
 
             formatted_msg = self._format_plain_message(raw_msg)
-            tb.insert("end", f"[{t_str}] {formatted_msg}")
+            tb.insert("end", f"[{t_str}] {formatted_msg}\n")
 
     def log(self, msg: str):
         t_str = time.strftime("%H:%M:%S")
@@ -938,6 +921,17 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
 
+    def copy_log(self):
+        content = self.log_text.get("1.0", "end-1c").strip()
+        if not content:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(content)
+        
+        orig_text = self.btn_copy.cget("text")
+        self.btn_copy.configure(text="Copied!")
+        self.after(1200, lambda: self.btn_copy.configure(text=orig_text))
+
     # ------------------------------------------------------------
     #  MQTT Client Logic
     # ------------------------------------------------------------
@@ -959,8 +953,9 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.subscribed_history = data.get("subscribed_history", [])
         self.auto_scroll_var.set(data.get("auto_scroll", True))
         self.quick_buttons = data.get("quick_buttons", [])
-        self.separate_logs_var.set(data.get("separate_logs", True))
-        self.format_json_var.set(data.get("format_json", False))
+        
+        # Load unified pretty log state (fallback to separate_logs if migrating)
+        self.pretty_log_var.set(data.get("pretty_log", data.get("separate_logs", True)))
 
         # Restore width & visibility state
         self.left_panel_visible = data.get("left_panel_visible", True)
@@ -1004,8 +999,7 @@ class MQTTWorkspace(ctk.CTkFrame):
             "quick_buttons": self.quick_buttons,
             "left_panel_width": left_w,
             "left_panel_visible": self.left_panel_visible,
-            "separate_logs": self.separate_logs_var.get(),
-            "format_json": self.format_json_var.get(),
+            "pretty_log": self.pretty_log_var.get(),
         }
 
     def connect(self):
