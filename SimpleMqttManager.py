@@ -7,7 +7,7 @@ from typing import Optional
 
 import customtkinter as ctk
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 
 try:
     import paho.mqtt.client as mqtt
@@ -15,7 +15,7 @@ except ImportError as exc:
     raise SystemExit("Missing dependency: paho-mqtt. Install it with: pip install paho-mqtt") from exc
 
 APP_TITLE = "Simple MQTT Manager"
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 DEFAULT_WORKSPACES = 8
 
 CONFIG_DIR = Path(__file__).parent / "config"
@@ -84,6 +84,12 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.quick_buttons: list[dict] = []
         self.raw_logs: list[tuple[str, str]] = []
 
+        # Single Hierarchy Tree State
+        self.tree_data: dict[str, dict] = {}
+        self.tree_nodes: dict[str, str] = {}
+        self._dirty_tree_topics: set[str] = set()
+        self._recent_pub_echo: dict[str, tuple[str, float]] = {}
+
         # Panel toggle state per workspace
         self.left_panel_visible = True
         self.saved_left_panel_width = 420
@@ -111,6 +117,8 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.pub_retain_var = tk.BooleanVar(value=False)
         self.sub_topic_var = tk.StringVar(value="device/telemetry")
         self.sub_qos_var = tk.StringVar(value="0")
+
+        self.view_mode_var = tk.StringVar(value="Logs")
         self.auto_scroll_var = tk.BooleanVar(value=True)
         self.log_filter_var = tk.StringVar(value="")
         self.pretty_log_var = tk.BooleanVar(value=True)
@@ -126,7 +134,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.sb_hover = ("#94a3b8", "#64748b")
 
         self.name_var.trace_add("write", lambda *a: self._on_name_change())
-        self.log_filter_var.trace_add("write", lambda *a: self._render_log())
+        self.log_filter_var.trace_add("write", lambda *a: self._on_filter_changed())
         self.pretty_log_var.trace_add("write", lambda *a: self._render_log())
 
         self._build_ui()
@@ -135,6 +143,10 @@ class MQTTWorkspace(ctk.CTkFrame):
     def _on_name_change(self):
         name = self.name_var.get().strip() or f"Workspace {self.workspace_id}"
         self.app.update_workspace_title(self.workspace_id, name)
+
+    def _on_filter_changed(self):
+        self._render_log()
+        self._rebuild_tree_all()
 
     def _truncate(self, text: str, max_len: int = 32) -> str:
         if len(text) > max_len:
@@ -286,6 +298,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         if hasattr(self, "paned_window"):
             self.paned_window.configure(bg=bg_color)
         self._setup_log_tags()
+        self._setup_tree_tags()
 
     def _build_connection_tab(self):
         tab = self.tabs.tab("Connection")
@@ -654,7 +667,10 @@ class MQTTWorkspace(ctk.CTkFrame):
 
         result = self.client.publish(topic, payload, qos=qos, retain=self.pub_retain_var.get())
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
+            self._recent_pub_echo[topic] = (payload.strip(), time.monotonic())
             self.log(f"QUICK PUB [{item['label']}]: {topic} -> {payload}")
+            self._record_to_tree(topic, payload, direction="PUB")
+            self._flush_tree_updates()
         else:
             self.log(f"QUICK PUB Failed for [{item['label']}], code={result.rc}")
 
@@ -695,7 +711,7 @@ class MQTTWorkspace(ctk.CTkFrame):
             Tooltip(action_btn, text=f"Topic: {item['topic']}\nPayload: {item['payload']}")
 
     # ------------------------------------------------------------
-    #  Smart Header-Strip Block Log View
+    #  Right Panel: Logs & Single Live Hierarchy Tree
     # ------------------------------------------------------------
     def _build_logs_section(self):
         self.logs_container.grid_rowconfigure(1, weight=1)
@@ -704,7 +720,17 @@ class MQTTWorkspace(ctk.CTkFrame):
         top = ctk.CTkFrame(self.logs_container, fg_color=("#e2e8f0", "#1e293b"), corner_radius=0)
         top.grid(row=0, column=0, sticky="ew")
 
-        ctk.CTkLabel(top, text="Logs", font=self.app.font_bold, text_color=("black", "white")).pack(side="left", padx=12, pady=5)
+        # Compact Mode Switcher
+        self.view_switcher = ctk.CTkSegmentedButton(
+            top,
+            values=["Logs", "Tree"],
+            variable=self.view_mode_var,
+            command=self._on_view_mode_changed,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            height=26,
+            width=110,
+        )
+        self.view_switcher.pack(side="left", padx=(10, 8), pady=5)
 
         # Auto-scroll
         self.scroll_check = ctk.CTkCheckBox(
@@ -718,7 +744,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         )
         self.scroll_check.pack(side="left", padx=8, pady=5)
 
-        # Combined: Pretty Blocks & Format JSON
+        # Pretty Log
         self.pretty_check = ctk.CTkCheckBox(
             top,
             text="Pretty Log",
@@ -743,8 +769,9 @@ class MQTTWorkspace(ctk.CTkFrame):
 
         self.btn_copy = ctk.CTkButton(top, text="Copy", width=65, height=26, font=ctk.CTkFont(size=12), fg_color="#334155", hover_color="#475569", command=self.copy_log)
         self.btn_copy.pack(side="right", padx=(4, 4), pady=5)
-        Tooltip(self.btn_copy, "Copy log contents to clipboard")
+        Tooltip(self.btn_copy, "Copy contents to clipboard")
 
+        # 1. Stream Log Textbox
         self.log_text = ctk.CTkTextbox(
             self.logs_container,
             font=self.app.font_log,
@@ -759,8 +786,264 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.log_text.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         self.log_text.configure(state="disabled")
 
-        self._setup_log_tags()
+        # 2. Single Clean Hierarchy Tree Frame
+        self.tree_frame = ctk.CTkFrame(
+            self.logs_container,
+            fg_color=self.TEXT_BG,
+            border_width=1,
+            border_color=self.CARD_BORDER,
+            corner_radius=6,
+        )
+        self.tree_frame.grid_rowconfigure(0, weight=1)
+        self.tree_frame.grid_columnconfigure(0, weight=1)
 
+        self.topic_tree = ttk.Treeview(
+            self.tree_frame,
+            show="tree",
+            selectmode="browse",
+            style="MQTT.Treeview",
+        )
+        self.topic_tree.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
+
+        tree_scroll = ctk.CTkScrollbar(
+            self.tree_frame,
+            orientation="vertical",
+            command=self.topic_tree.yview,
+            button_color=self.sb_color,
+            button_hover_color=self.sb_hover,
+        )
+        tree_scroll.grid(row=0, column=1, sticky="ns", padx=3, pady=6)
+        self.topic_tree.configure(yscrollcommand=tree_scroll.set)
+
+        self._setup_log_tags()
+        self._setup_tree_tags()
+
+    def _on_view_mode_changed(self, mode: str):
+        if mode == "Tree":
+            self.log_text.grid_remove()
+            self.tree_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+            self._flush_tree_updates()
+        else:
+            self.tree_frame.grid_remove()
+            self.log_text.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        self.app.save_settings()
+
+    def _setup_tree_tags(self):
+        if not hasattr(self, "topic_tree"):
+            return
+        is_dark = ctk.get_appearance_mode().lower() == "dark"
+        self.topic_tree.tag_configure("tree_branch", foreground="#94a3b8" if is_dark else "#475569", font=("Consolas", 12, "bold"))
+        self.topic_tree.tag_configure("tree_topic_sub", foreground="#38bdf8" if is_dark else "#0284c7", font=("Consolas", 12, "bold"))
+        self.topic_tree.tag_configure("tree_topic_pub", foreground="#fb923c" if is_dark else "#c2410c", font=("Consolas", 12, "bold"))
+        self.topic_tree.tag_configure("tree_param", foreground="#f8fafc" if is_dark else "#0f172a", font=("Consolas", 12))
+        self.topic_tree.tag_configure("tree_param_changed", foreground="#4ade80" if is_dark else "#16a34a", font=("Consolas", 12, "bold"))
+
+    def _merge_json_params(self, old_dict: dict, new_dict: dict, prefix: str = "") -> set[str]:
+        """Merges incoming JSON parameters into existing state and returns keys whose values changed."""
+        changed: set[str] = set()
+        for k, v in new_dict.items():
+            full_key = f"{prefix}.{k}" if prefix else str(k)
+            if isinstance(v, dict) and isinstance(old_dict.get(k), dict):
+                changed.update(self._merge_json_params(old_dict[k], v, full_key))
+            else:
+                if k in old_dict and old_dict[k] != v:
+                    changed.add(full_key)
+                old_dict[k] = v
+        return changed
+
+    def _record_to_tree(self, topic: str, payload: str, direction: str = "SUB"):
+        t_str = time.strftime("%H:%M:%S")
+        raw = payload.strip()
+
+        parsed_json = None
+        if (raw.startswith("{") and raw.endswith("}")) or (raw.startswith("[") and raw.endswith("]")):
+            try:
+                parsed_json = json.loads(raw)
+            except Exception:
+                parsed_json = None
+
+        prev = self.tree_data.get(topic)
+
+        if isinstance(parsed_json, dict):
+            if prev and prev.get("is_dict"):
+                params = prev["params"]
+                changed = self._merge_json_params(params, parsed_json)
+            else:
+                params = dict(parsed_json)
+                changed = set()
+
+            self.tree_data[topic] = {
+                "is_dict": True,
+                "params": params,
+                "changed": changed,
+                "time": t_str,
+                "raw": raw,
+                "direction": direction,
+            }
+        else:
+            val_changed = bool(prev and not prev.get("is_dict") and prev.get("value") != raw)
+            self.tree_data[topic] = {
+                "is_dict": False,
+                "value": raw,
+                "changed": val_changed,
+                "time": t_str,
+                "raw": raw,
+                "direction": direction,
+            }
+
+        self._dirty_tree_topics.add(topic)
+
+    def _topic_matches_filter(self, topic: str, info: dict) -> bool:
+        filt = self.log_filter_var.get().strip().lower()
+        if not filt:
+            return True
+        direction = info.get("direction", "SUB").lower()
+        if filt in topic.lower() or filt in direction or filt in info.get("raw", "").lower():
+            return True
+        if info.get("is_dict"):
+            return filt in json.dumps(info["params"], ensure_ascii=False).lower()
+        return False
+
+    def _flush_tree_updates(self):
+        if not self._dirty_tree_topics:
+            return
+
+        dirty = list(self._dirty_tree_topics)
+        self._dirty_tree_topics.clear()
+
+        for topic in dirty:
+            info = self.tree_data.get(topic)
+            if info and self._topic_matches_filter(topic, info):
+                self._upsert_topic_hierarchy(topic, info)
+
+    def _upsert_topic_hierarchy(self, topic: str, info: dict):
+        parts = [p for p in topic.split("/") if p != ""]
+        if not parts:
+            parts = [topic]
+
+        parent_id = ""
+        current_path = ""
+        direction = info.get("direction", "SUB")
+        is_pub = direction == "PUB"
+        dir_badge = f"⬆ PUB  {info['time']}" if is_pub else f"⬇ SUB  {info['time']}"
+        topic_tag = "tree_topic_pub" if is_pub else "tree_topic_sub"
+
+        # 1. Ensure topic hierarchy path exists
+        for idx, part in enumerate(parts):
+            current_path = f"{current_path}/{part}" if current_path else part
+            node_key = f"topic:{current_path}"
+            is_last = idx == len(parts) - 1
+
+            if node_key not in self.tree_nodes:
+                node_id = self.topic_tree.insert(
+                    parent_id,
+                    "end",
+                    text=part,
+                    open=True,
+                    tags=(topic_tag if is_last else "tree_branch",),
+                )
+                self.tree_nodes[node_key] = node_id
+
+            node_id = self.tree_nodes[node_key]
+
+            if is_last:
+                if info["is_dict"]:
+                    self.topic_tree.item(
+                        node_id,
+                        text=f"{part}   [{dir_badge}]",
+                        tags=(topic_tag,),
+                    )
+                    self._upsert_json_parameters(
+                        topic_base=current_path,
+                        parent_node_id=node_id,
+                        params_dict=info["params"],
+                        changed_set=info["changed"],
+                    )
+                else:
+                    single_line = " ".join(str(info["value"]).splitlines()).strip() or "<empty>"
+                    tag = "tree_param_changed" if info.get("changed") else topic_tag
+                    self.topic_tree.item(
+                        node_id,
+                        text=f"{part}: {single_line}   [{dir_badge}]",
+                        tags=(tag,),
+                    )
+
+            parent_id = node_id
+
+    def _upsert_json_parameters(self, topic_base: str, parent_node_id: str, params_dict: dict, changed_set: set[str], prefix: str = ""):
+        filt = self.log_filter_var.get().strip().lower()
+        info = self.tree_data.get(topic_base, {})
+        dir_str = info.get("direction", "SUB").lower()
+        topic_matched = not filt or filt in topic_base.lower() or filt in dir_str
+
+        for k, v in params_dict.items():
+            full_param_key = f"{prefix}.{k}" if prefix else str(k)
+            node_key = f"param:{topic_base}:{full_param_key}"
+
+            if not topic_matched:
+                kv_str = f"{k}: {v}".lower()
+                if filt not in kv_str and filt not in full_param_key.lower():
+                    continue
+
+            if isinstance(v, dict):
+                if node_key not in self.tree_nodes:
+                    sub_id = self.topic_tree.insert(
+                        parent_node_id,
+                        "end",
+                        text=str(k),
+                        open=True,
+                        tags=("tree_branch",),
+                    )
+                    self.tree_nodes[node_key] = sub_id
+                else:
+                    sub_id = self.tree_nodes[node_key]
+                    self.topic_tree.item(sub_id, text=str(k), tags=("tree_branch",))
+
+                self._upsert_json_parameters(topic_base, sub_id, v, changed_set, full_param_key)
+            else:
+                if isinstance(v, (list, bool)) or v is None:
+                    val_str = json.dumps(v, ensure_ascii=False)
+                else:
+                    val_str = str(v)
+
+                line_text = f"{k}: {val_str}"
+                tag = "tree_param_changed" if full_param_key in changed_set else "tree_param"
+
+                if node_key not in self.tree_nodes:
+                    leaf_id = self.topic_tree.insert(
+                        parent_node_id,
+                        "end",
+                        text=line_text,
+                        open=True,
+                        tags=(tag,),
+                    )
+                    self.tree_nodes[node_key] = leaf_id
+                else:
+                    leaf_id = self.tree_nodes[node_key]
+                    self.topic_tree.item(leaf_id, text=line_text, tags=(tag,))
+
+    def _rebuild_tree_all(self):
+        if not hasattr(self, "topic_tree"):
+            return
+        self.topic_tree.delete(*self.topic_tree.get_children())
+        self.tree_nodes.clear()
+        self._dirty_tree_topics.clear()
+
+        for topic, info in self.tree_data.items():
+            if self._topic_matches_filter(topic, info):
+                self._upsert_topic_hierarchy(topic, info)
+
+    def _serialize_tree_to_text(self, parent_id: str = "", indent: int = 0) -> list[str]:
+        lines = []
+        for child_id in self.topic_tree.get_children(parent_id):
+            txt = self.topic_tree.item(child_id, "text")
+            lines.append("  " * indent + txt)
+            lines.extend(self._serialize_tree_to_text(child_id, indent + 1))
+        return lines
+
+    # ------------------------------------------------------------
+    #  Stream Log Formatting
+    # ------------------------------------------------------------
     def _setup_log_tags(self):
         mode = ctk.get_appearance_mode().lower()
         is_dark = mode == "dark"
@@ -783,7 +1066,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         tb.tag_config("hdr_topic", foreground=c_topic, background=bg_bar, spacing1=6, spacing3=3)
 
         tb.tag_config("hdr_pub_badge", foreground=c_pub, background=bg_bar, spacing1=6, spacing3=3)
-            
+
         tb.tag_config("hdr_err_time", foreground=c_time, background=bg_bar_err, spacing1=6, spacing3=3)
         tb.tag_config("hdr_err_badge", foreground=c_err, background=bg_bar_err, spacing1=6, spacing3=3)
         tb.tag_config("hdr_err_topic", foreground=c_err, background=bg_bar_err, spacing1=6, spacing3=3)
@@ -916,18 +1199,34 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.log_text.configure(state="disabled")
 
     def clear_log(self):
-        self.raw_logs.clear()
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.configure(state="disabled")
+        if self.view_mode_var.get() == "Tree":
+            self.tree_data.clear()
+            self.tree_nodes.clear()
+            self._dirty_tree_topics.clear()
+            self.topic_tree.delete(*self.topic_tree.get_children())
+        else:
+            self.raw_logs.clear()
+            self.log_text.configure(state="normal")
+            self.log_text.delete("1.0", "end")
+            self.log_text.configure(state="disabled")
 
     def copy_log(self):
-        content = self.log_text.get("1.0", "end-1c").strip()
+        if self.view_mode_var.get() == "Tree":
+            sel = self.topic_tree.selection()
+            if sel:
+                lines = [self.topic_tree.item(sel[0], "text")]
+                lines.extend(self._serialize_tree_to_text(sel[0], indent=1))
+                content = "\n".join(lines)
+            else:
+                content = "\n".join(self._serialize_tree_to_text())
+        else:
+            content = self.log_text.get("1.0", "end-1c").strip()
+
         if not content:
             return
         self.clipboard_clear()
         self.clipboard_append(content)
-        
+
         orig_text = self.btn_copy.cget("text")
         self.btn_copy.configure(text="Copied!")
         self.after(1200, lambda: self.btn_copy.configure(text=orig_text))
@@ -953,9 +1252,13 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.subscribed_history = data.get("subscribed_history", [])
         self.auto_scroll_var.set(data.get("auto_scroll", True))
         self.quick_buttons = data.get("quick_buttons", [])
-        
-        # Load unified pretty log state (fallback to separate_logs if migrating)
+
         self.pretty_log_var.set(data.get("pretty_log", data.get("separate_logs", True)))
+
+        saved_mode = data.get("view_mode", "Logs")
+        if saved_mode in ("Logs", "Tree"):
+            self.view_mode_var.set(saved_mode)
+            self._on_view_mode_changed(saved_mode)
 
         # Restore width & visibility state
         self.left_panel_visible = data.get("left_panel_visible", True)
@@ -1000,6 +1303,7 @@ class MQTTWorkspace(ctk.CTkFrame):
             "left_panel_width": left_w,
             "left_panel_visible": self.left_panel_visible,
             "pretty_log": self.pretty_log_var.get(),
+            "view_mode": self.view_mode_var.get(),
         }
 
     def connect(self):
@@ -1088,7 +1392,7 @@ class MQTTWorkspace(ctk.CTkFrame):
 
     def on_message(self, client, userdata, msg):
         payload = msg.payload.decode(errors="ignore")
-        self.event_queue.put(("log", f"MSG {msg.topic}: {payload}"))
+        self.event_queue.put(("mqtt_msg", (msg.topic, payload)))
 
     def publish_message(self):
         if not self.connected or not self.client:
@@ -1112,9 +1416,12 @@ class MQTTWorkspace(ctk.CTkFrame):
             if len(self.published_history) > 30:
                 self.published_history.pop()
 
+            self._recent_pub_echo[topic] = (payload.strip(), time.monotonic())
             self.app.save_settings()
             self._refresh_pub_history_ui()
             self.log(f"PUB: {topic} -> {payload}")
+            self._record_to_tree(topic, payload, direction="PUB")
+            self._flush_tree_updates()
         else:
             self.log(f"PUB failed: {topic}, rc={result.rc}")
 
@@ -1161,11 +1468,21 @@ class MQTTWorkspace(ctk.CTkFrame):
 
     def _process_event_queue(self):
         processed_count = 0
-        while processed_count < 30:
+        while processed_count < 50:
             try:
                 ev, data = self.event_queue.get_nowait()
                 processed_count += 1
-                if ev == "log":
+                if ev == "mqtt_msg" and isinstance(data, tuple):
+                    topic, payload = data
+                    self.log(f"MSG {topic}: {payload}")
+
+                    # Check if this incoming message is just the broker echoing our own recent publish
+                    echo_info = self._recent_pub_echo.get(topic)
+                    if echo_info and echo_info[0] == payload.strip() and (time.monotonic() - echo_info[1]) < 1.5:
+                        self._recent_pub_echo.pop(topic, None)
+                    else:
+                        self._record_to_tree(topic, payload, direction="SUB")
+                elif ev == "log":
                     self.log(str(data))
                 elif ev == "connected":
                     self.connected = True
@@ -1182,6 +1499,9 @@ class MQTTWorkspace(ctk.CTkFrame):
                     self._maybe_schedule_reconnect()
             except queue.Empty:
                 break
+
+        if self._dirty_tree_topics:
+            self._flush_tree_updates()
 
         next_delay = 80 if (self.connected or not self.event_queue.empty()) else 300
         self.after(next_delay, self._process_event_queue)
@@ -1241,6 +1561,8 @@ class MQTTControlCenter(ctk.CTk):
             except Exception:
                 pass
 
+        self._apply_treeview_theme()
+
         for i in range(1, num_workspaces + 1):
             tab_title = f"Workspace {i}"
             tab_obj = self.workspace_tabs.add(tab_title)
@@ -1267,6 +1589,34 @@ class MQTTControlCenter(ctk.CTk):
 
         self.update_idletasks()
         self.deiconify()
+
+    def _apply_treeview_theme(self):
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+
+        is_dark = self.appearance_mode.lower() == "dark"
+        bg = "#0f172a" if is_dark else "#ffffff"
+        fg = "#f8fafc" if is_dark else "#0f172a"
+        sel_bg = "#1e293b" if is_dark else "#e2e8f0"
+
+        style.configure(
+            "MQTT.Treeview",
+            background=bg,
+            foreground=fg,
+            fieldbackground=bg,
+            borderwidth=0,
+            relief="flat",
+            rowheight=26,
+            font=("Consolas", 12),
+        )
+        style.map(
+            "MQTT.Treeview",
+            background=[("selected", sel_bg)],
+            foreground=[("selected", fg)],
+        )
 
     def _on_workspace_tab_changed(self):
         name = self.workspace_tabs.get()
@@ -1305,6 +1655,7 @@ class MQTTControlCenter(ctk.CTk):
     def toggle_theme(self):
         self.appearance_mode = "dark" if self.appearance_mode == "light" else "light"
         ctk.set_appearance_mode(self.appearance_mode)
+        self._apply_treeview_theme()
 
         for ws in self.workspaces:
             if ws is not None:
@@ -1350,3 +1701,8 @@ class MQTTControlCenter(ctk.CTk):
 if __name__ == "__main__":
     app = MQTTControlCenter()
     app.mainloop()
+
+
+
+
+
