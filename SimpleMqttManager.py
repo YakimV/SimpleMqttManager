@@ -15,7 +15,7 @@ except ImportError as exc:
     raise SystemExit("Missing dependency: paho-mqtt. Install it with: pip install paho-mqtt") from exc
 
 APP_TITLE = "Simple MQTT Manager"
-APP_VERSION = "1.4"
+APP_VERSION = "1.4" 
 DEFAULT_WORKSPACES = 8
 
 CONFIG_DIR = Path(__file__).parent / "config"
