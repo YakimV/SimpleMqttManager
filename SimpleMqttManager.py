@@ -203,12 +203,15 @@ class MQTTWorkspace(ctk.CTkFrame):
         Tooltip(self.theme_btn, "Toggle Light/Dark Theme")
 
         paned_bg = "#cbd5e1" if ctk.get_appearance_mode().lower() == "light" else "#1e293b"
+        # Тонкий 2-4px розмежувач замість масивного 10px блоку
         self.paned_window = tk.PanedWindow(
             self,
             orient="horizontal",
             bd=0,
-            sashwidth=10,
-            bg=paned_bg,
+            sashwidth=4,              # було 10 — робимо акуратну тонку лінію
+            sashrelief="flat",        # прибирає псевдо-3D системні фаски Tkinter
+            sashpad=0,
+            bg="#e2e8f0" if ctk.get_appearance_mode().lower() == "light" else "#0f172a",
             sashcursor="sb_h_double_arrow",
         )
         self.paned_window.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
@@ -223,10 +226,11 @@ class MQTTWorkspace(ctk.CTkFrame):
         self.tabs = ctk.CTkTabview(
             self.left_panel,
             corner_radius=0,
-            fg_color=("#f8fafc", "#1e293b"),
+            border_width=0,          # вимикаємо зовнішню обводку самого таб-контролу
+            fg_color=panel_fg,       # колір збігається з фоном left_panel
             command=self._on_inner_tab_changed,
         )
-        self.tabs.pack(fill="both", expand=True, padx=2, pady=2)
+        self.tabs.pack(fill="both", expand=True, padx=0, pady=0)  # без зайвих зазорів
 
         try:
             self.tabs._segmented_button.configure(font=self.app.font_normal)
@@ -294,6 +298,7 @@ class MQTTWorkspace(ctk.CTkFrame):
 
     def update_theme_button_icon(self, mode: str):
         self.theme_btn.configure(text="☀️ Light" if mode.lower() == "dark" else "🌙 Dark")
+        # Тонкий розділювач має бути ледь помітним (трохи темніший за фон панелей)
         bg_color = "#cbd5e1" if mode.lower() == "light" else "#1e293b"
         if hasattr(self, "paned_window"):
             self.paned_window.configure(bg=bg_color)
@@ -382,7 +387,7 @@ class MQTTWorkspace(ctk.CTkFrame):
         ctk.CTkOptionMenu(opts_frame, values=["0", "1", "2"], variable=self.pub_qos_var, width=60).pack(side="left", padx=(0, 20))
         ctk.CTkCheckBox(opts_frame, text="Retain", variable=self.pub_retain_var, font=self.app.font_normal, text_color=("black", "white")).pack(side="left")
 
-        saved_block = ctk.CTkFrame(tab, fg_color=self.CARD_BG, border_width=1, border_color=self.CARD_BORDER, corner_radius=6)
+        saved_block = ctk.CTkFrame(tab, fg_color=self.CARD_BG, border_width=0, border_color=self.CARD_BORDER, corner_radius=6)
         saved_block.grid(row=2, column=0, padx=10, pady=5, sticky="ew")
         ctk.CTkLabel(saved_block, text="Recent Topics", font=self.app.font_bold, text_color=self.TITLE_COLOR).pack(anchor="w", padx=10, pady=(5, 0))
 
@@ -494,7 +499,7 @@ class MQTTWorkspace(ctk.CTkFrame):
 
         tab.grid_rowconfigure(2, weight=1)
 
-        active_block = ctk.CTkFrame(tab, fg_color=self.CARD_BG, border_width=1, border_color=self.CARD_BORDER, corner_radius=6)
+        active_block = ctk.CTkFrame(tab, fg_color=self.CARD_BG, border_width=0, border_color=self.CARD_BORDER, corner_radius=6)
         active_block.grid(row=2, column=0, padx=10, pady=5, sticky="nsew")
 
         header_row = ctk.CTkFrame(active_block, fg_color="transparent")
@@ -581,49 +586,199 @@ class MQTTWorkspace(ctk.CTkFrame):
     def _build_buttons_tab(self):
         tab = self.tabs.tab("Buttons")
         tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(1, weight=1)
 
-        input_frame = ctk.CTkFrame(tab, fg_color="transparent")
-        input_frame.grid(row=0, column=0, padx=10, pady=5, sticky="ew")
-        input_frame.grid_columnconfigure(1, weight=1)
+        # 1. Верхня панель дій
+        top_bar = ctk.CTkFrame(tab, fg_color="transparent")
+        top_bar.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
+        
+        ctk.CTkLabel(top_bar, text="Quick Dashboard", font=self.app.font_bold, text_color=self.TITLE_COLOR).pack(side="left")
+        
+        ctk.CTkButton(
+            top_bar, 
+            text="+ Add Command", 
+            width=120, 
+            height=28, 
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=lambda: self._open_macro_dialog()
+        ).pack(side="right")
 
-        ctk.CTkLabel(input_frame, text="Name", font=self.app.font_normal, text_color=("black", "white")).grid(row=0, column=0, padx=(0, 10), pady=4, sticky="w")
-        self.macro_name_var = tk.StringVar()
-        ctk.CTkEntry(input_frame, textvariable=self.macro_name_var, font=self.app.font_normal).grid(row=0, column=1, pady=4, sticky="ew")
-
-        ctk.CTkLabel(input_frame, text="Topic", font=self.app.font_normal, text_color=("black", "white")).grid(row=1, column=0, padx=(0, 10), pady=4, sticky="w")
-        self.macro_topic_var = tk.StringVar()
-        ctk.CTkEntry(input_frame, textvariable=self.macro_topic_var, font=self.app.font_normal).grid(row=1, column=1, pady=4, sticky="ew")
-
-        ctk.CTkLabel(tab, text="Payload", font=self.app.font_bold, text_color=("black", "white")).grid(row=1, column=0, padx=10, pady=(5, 0), sticky="w")
-
-        self.macro_payload_text = ctk.CTkTextbox(
-            tab,
-            font=self.app.font_log,
-            height=60,
-            border_width=1,
-            border_color=self.CARD_BORDER,
-            fg_color=self.TEXT_BG,
-            corner_radius=6,
-            scrollbar_button_color=self.sb_color,
-            scrollbar_button_hover_color=self.sb_hover,
-        )
-        self.macro_payload_text.grid(row=2, column=0, padx=10, pady=(0, 5), sticky="ew")
-
-        ctk.CTkButton(tab, text="Save Quick Command", height=38, font=self.app.font_bold, command=self.add_quick_button).grid(row=3, column=0, padx=10, pady=10, sticky="ew")
-
-        dash_block = ctk.CTkFrame(tab, fg_color=self.CARD_BG, border_width=1, border_color=self.CARD_BORDER, corner_radius=6)
-        dash_block.grid(row=4, column=0, padx=10, pady=5, sticky="nsew")
-        tab.grid_rowconfigure(4, weight=1)
-
-        ctk.CTkLabel(dash_block, text="Command Dashboard", font=self.app.font_bold, text_color=self.TITLE_COLOR).pack(anchor="w", padx=10, pady=(5, 0))
-
+        # 2. Зона плиток / карток у 2 колонки
         self.macro_scroll_zone = ctk.CTkScrollableFrame(
-            dash_block,
+            tab,
             fg_color="transparent",
             scrollbar_button_color=self.sb_color,
             scrollbar_button_hover_color=self.sb_hover,
         )
-        self.macro_scroll_zone.pack(fill="both", expand=True, padx=5, pady=5)
+        self.macro_scroll_zone.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        self.macro_scroll_zone.grid_columnconfigure((0, 1), weight=1, uniform="col")
+
+    def _open_macro_dialog(self, edit_idx: Optional[int] = None):
+        """Модальне вікно для створення / редагування команди."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Edit Command" if edit_idx is not None else "Add Command")
+        dialog.geometry("420x400")
+        dialog.resizable(False, False)
+        
+        # Прив'язка до батьківського вікна
+        root_window = self.winfo_toplevel()
+        dialog.transient(root_window)
+
+        # Центруємо відносно головного вікна
+        dialog.update_idletasks()
+        rx = root_window.winfo_x() + (root_window.winfo_width() // 2) - 210
+        ry = root_window.winfo_y() + (root_window.winfo_height() // 2) - 200
+        dialog.geometry(f"+{max(0, rx)}+{max(0, ry)}")
+
+        # Фікс для Linux: захоплюємо фокус тільки після відмальовки вікна
+        dialog.lift()
+        dialog.focus_force()
+        dialog.after(100, lambda: dialog.grab_set() if dialog.winfo_exists() else None)
+
+        existing = self.quick_buttons[edit_idx] if edit_idx is not None else {}
+
+        name_var = tk.StringVar(value=existing.get("label", ""))
+        topic_var = tk.StringVar(value=existing.get("topic", ""))
+
+        content = ctk.CTkFrame(dialog, fg_color="transparent")
+        content.pack(fill="both", expand=True, padx=20, pady=15)
+
+        ctk.CTkLabel(content, text="Button Label", font=self.app.font_bold).pack(anchor="w", pady=(0, 2))
+        e_name = ctk.CTkEntry(content, textvariable=name_var, placeholder_text="e.g. Reboot Device")
+        e_name.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(content, text="MQTT Topic", font=self.app.font_bold).pack(anchor="w", pady=(0, 2))
+        e_topic = ctk.CTkEntry(content, textvariable=topic_var, placeholder_text="e.g. dev/esp32/cmd")
+        e_topic.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(content, text="Payload (Text or JSON)", font=self.app.font_bold).pack(anchor="w", pady=(0, 2))
+        txt_payload = ctk.CTkTextbox(content, height=100, font=self.app.font_log)
+        txt_payload.pack(fill="both", expand=True, pady=(0, 15))
+        if existing.get("payload"):
+            txt_payload.insert("1.0", existing["payload"])
+
+        def save_and_close():
+            name = name_var.get().strip()
+            topic = topic_var.get().strip()
+            payload = txt_payload.get("1.0", "end").strip()
+
+            if not name or not topic:
+                messagebox.showerror("Validation Error", "Name and Topic are required.", parent=dialog)
+                return
+
+            item_data = {"label": name, "topic": topic, "payload": payload}
+
+            if edit_idx is not None:
+                self.quick_buttons[edit_idx] = item_data
+            else:
+                self.quick_buttons.append(item_data)
+
+            self.app.save_settings()
+            self._refresh_quick_buttons_ui()
+            dialog.destroy()
+
+        btn_box = ctk.CTkFrame(content, fg_color="transparent")
+        btn_box.pack(fill="x")
+        ctk.CTkButton(btn_box, text="Save", font=self.app.font_bold, command=save_and_close).pack(side="left", fill="x", expand=True, padx=(0, 5))
+        ctk.CTkButton(btn_box, text="Cancel", fg_color="#64748b", hover_color="#475569", command=dialog.destroy).pack(side="right", padx=(5, 0))
+    def _refresh_quick_buttons_ui(self):
+        if not hasattr(self, "macro_scroll_zone"):
+            return
+
+        for w in self.macro_scroll_zone.winfo_children():
+            w.destroy()
+
+        if not self.quick_buttons:
+            empty_lbl = ctk.CTkLabel(
+                self.macro_scroll_zone, 
+                text="No quick commands yet.\nClick '+ Add Command' to create one.",
+                text_color=("#64748b", "#94a3b8"),
+                font=self.app.font_normal
+            )
+            empty_lbl.grid(row=0, column=0, columnspan=2, pady=40)
+            return
+
+        for idx, item in enumerate(self.quick_buttons):
+            row = idx // 2
+            col = idx % 2
+
+            # Картка команди
+            card = ctk.CTkFrame(
+                self.macro_scroll_zone, 
+                fg_color=self.CARD_BG, 
+                border_width=1, 
+                border_color=self.CARD_BORDER,
+                corner_radius=8
+            )
+            card.grid(row=row, column=col, sticky="nsew", padx=4, pady=4)
+
+            # Верхній рядок картки: назва та мікро-кнопки
+            header = ctk.CTkFrame(card, fg_color="transparent")
+            header.pack(fill="x", padx=8, pady=(6, 2))
+
+            title = ctk.CTkLabel(
+                header, 
+                text=self._truncate(item["label"], 20), 
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color=self.TITLE_COLOR,
+                anchor="w"
+            )
+            title.pack(side="left", fill="x", expand=True)
+
+            # Кнопка редагування (✎)
+            edit_btn = ctk.CTkButton(
+                header,
+                text="✎",
+                width=22,
+                height=22,
+                font=ctk.CTkFont(size=11),
+                fg_color="transparent",
+                text_color=("#475569", "#94a3b8"),
+                hover_color=("#cbd5e1", "#334155"),
+                command=lambda i=idx: self._open_macro_dialog(edit_idx=i)
+            )
+            edit_btn.pack(side="right", padx=(2, 0))
+            Tooltip(edit_btn, "Edit")
+
+            # Кнопка видалення (×)
+            del_btn = ctk.CTkButton(
+                header,
+                text="×",
+                width=22,
+                height=22,
+                font=ctk.CTkFont(size=14, weight="bold"),
+                fg_color="transparent",
+                text_color=("#ef4444", "#f87171"),
+                hover_color=("#fee2e2", "#450a0a"),
+                command=lambda i=idx: self.delete_quick_button(i)
+            )
+            del_btn.pack(side="right")
+            Tooltip(del_btn, "Delete")
+
+            # Топік підказкою
+            topic_lbl = ctk.CTkLabel(
+                card, 
+                text=self._truncate(item["topic"], 26), 
+                font=ctk.CTkFont(family="Consolas", size=10),
+                text_color=("#64748b", "#94a3b8"),
+                anchor="w"
+            )
+            topic_lbl.pack(fill="x", padx=8, pady=(0, 6))
+
+            # Основна кнопка запуску
+            run_btn = ctk.CTkButton(
+                card,
+                text="▶ Send",
+                height=30,
+                corner_radius=5,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color=("#0284c7", "#0284c7"),
+                hover_color=("#0369a1", "#0369a1"),
+                command=lambda it=item: self.execute_quick_button(it)
+            )
+            run_btn.pack(fill="x", padx=8, pady=(0, 8))
+
+            Tooltip(card, text=f"Topic: {item['topic']}\nPayload: {item['payload'] or '<empty>'}")
 
     def add_quick_button(self):
         name = self.macro_name_var.get().strip()
