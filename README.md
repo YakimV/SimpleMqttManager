@@ -12,7 +12,7 @@ Allows you to:
 * View the data exchange log in real time.
 
 
-<img width="1288" height="929" alt="Screenshot from 2026-10-01 13-05-30" src="https://github.com/user-attachments/assets/4b59c6a3-9259-4c98-8396-b5f5340d9c95" />
+<img width="1288" height="826" alt="Screenshot from 2026-10-26 13-24-37" src="https://github.com/user-attachments/assets/833defd8-15fa-4d77-a81d-3ac56bb92693" />
 
-<img width="1288" height="929" alt="Screenshot from 2026-10-01 13-06-15" src="https://github.com/user-attachments/assets/42422332-1593-4fd6-9fac-afa4fe408335" />
+<img width="1288" height="826" alt="Screenshot from 2026-10-26 13-23-34" src="https://github.com/user-attachments/assets/a9013dcc-f642-402e-a022-945f1694a852" />
 
